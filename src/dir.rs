@@ -125,11 +125,13 @@ impl<FE> DirLock<FE> {
     }
 
     pub async fn read(&self) -> DirReadGuard<FE> {
-        unimplemented!()
+        let guard = self.inner.clone().read_owned().await;
+        DirReadGuard { guard }
     }
 
-    pub async fn write(&self) -> DirReadGuard<FE> {
-        unimplemented!()
+    pub async fn write(&self) -> DirWriteGuard<FE> {
+        let guard = self.inner.clone().write_owned().await;
+        DirWriteGuard { guard }
     }
 }
 
