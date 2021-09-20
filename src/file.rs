@@ -8,9 +8,9 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use crate::Cache;
 
 pub trait FileEntry<F> {
-    fn as_type(&self) -> Option<&F>;
+    fn as_file(&self) -> Option<&F>;
 
-    fn as_type_mut(&mut self) -> Option<&mut F>;
+    fn as_file_mut(&mut self) -> Option<&mut F>;
 }
 
 pub trait File {}
@@ -33,11 +33,17 @@ pub struct FileLock<FE> {
 }
 
 impl<FE> FileLock<FE> {
-    pub async fn read<F, E>(&self) -> Option<FileReadGuard<F>> {
+    pub async fn read<F, E>(&self) -> Option<FileReadGuard<F>>
+    where
+        FE: FileEntry<F>,
+    {
         unimplemented!()
     }
 
-    pub async fn write<F, E>(&self) -> Option<FileWriteGuard<F>> {
+    pub async fn write<F, E>(&self) -> Option<FileWriteGuard<F>>
+    where
+        FE: FileEntry<F>,
+    {
         unimplemented!()
     }
 }

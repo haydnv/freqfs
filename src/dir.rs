@@ -42,7 +42,7 @@ pub struct Dir<FE> {
 }
 
 impl<FE> Dir<FE> {
-    pub fn create_dir<F, Q>(&mut self, name: Q) -> Result<DirLock<FE>, io::Error>
+    pub fn create_dir<F, Q>(&mut self, _name: Q) -> Result<DirLock<FE>, io::Error>
     where
         FE: From<F>,
         Q: AsRef<String>,
@@ -50,7 +50,7 @@ impl<FE> Dir<FE> {
         unimplemented!()
     }
 
-    pub fn create_file<F, Q>(&mut self, name: Q, file: F) -> Result<FileLock<FE>, io::Error>
+    pub fn create_file<F, Q>(&mut self, _name: Q, _file: F) -> Result<FileLock<FE>, io::Error>
     where
         FE: From<F>,
         Q: AsRef<String>,

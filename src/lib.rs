@@ -53,7 +53,7 @@ impl Cache {
     }
 }
 
-pub async fn load<FD: File>(root: PathBuf, cache_size: usize) -> Result<DirLock<FD>, io::Error> {
+pub async fn load<FE>(root: PathBuf, cache_size: usize) -> Result<DirLock<FE>, io::Error> {
     let (tx, rx) = mpsc::unbounded_channel();
     let cache = Arc::new(Cache::new(cache_size, tx));
     spawn_cleanup_thread(cache.clone(), rx);
