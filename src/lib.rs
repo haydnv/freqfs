@@ -4,19 +4,16 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
 
-#[allow(unused)]
 mod dir;
-#[allow(unused)]
 mod file;
 
-pub use dir::{DirEntry, DirLock};
-pub use file::{File, FileEntry, FileLock};
+pub use dir::{DirEntry, DirLock, DirReadGuard, DirWriteGuard};
+pub use file::{FileEntry, FileLoad, FileLock, FileReadGuard, FileWriteGuard};
 
 type LFU = freqache::LFUCache<PathBuf>;
 
 struct Evict;
 
-#[allow(unused)]
 struct Cache {
     lfu: LFU,
     size: Mutex<usize>,
@@ -25,12 +22,12 @@ struct Cache {
 }
 
 impl Cache {
-    #[allow(unused)]
     fn insert(&self, path: PathBuf, file_size: usize) {
         let mut size = self.size.lock().expect("file cache size");
-        *size += file_size;
 
-        self.lfu.insert(path);
+        if !self.lfu.insert(path) {
+            *size += file_size;
+        }
 
         if &*size > &self.capacity {
             if let Err(cause) = self.tx.send(Evict) {
@@ -67,86 +64,4 @@ fn spawn_cleanup_thread(_cache: Arc<Cache>, mut rx: mpsc::UnboundedReceiver<Evic
             unimplemented!()
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rand::Rng;
-    use std::path::PathBuf;
-    use tokio::fs;
-    use tokio::io::AsyncWriteExt;
-
-    #[allow(unused)]
-    enum FileEnum {
-        Bin(Vec<u8>),
-        Text(String),
-    }
-
-    impl FileEntry<Vec<u8>> for FileEnum {
-        fn as_file(&self) -> Option<&Vec<u8>> {
-            match self {
-                Self::Bin(bytes) => Some(bytes),
-                _ => None,
-            }
-        }
-
-        fn as_file_mut(&mut self) -> Option<&mut Vec<u8>> {
-            match self {
-                Self::Bin(bytes) => Some(bytes),
-                _ => None,
-            }
-        }
-    }
-
-    impl FileEntry<String> for FileEnum {
-        fn as_file(&self) -> Option<&String> {
-            match self {
-                Self::Text(text) => Some(text),
-                _ => None,
-            }
-        }
-
-        fn as_file_mut(&mut self) -> Option<&mut String> {
-            match self {
-                Self::Text(text) => Some(text),
-                _ => None,
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_load() {
-        let mut rng = rand::thread_rng();
-        let path = loop {
-            let rand: u32 = rng.gen();
-            let path = PathBuf::from(format!("/tmp/test_freqfs_{}", rand));
-            if !path.exists() {
-                fs::create_dir(&path).await.expect("tmp test dir");
-
-                let mut file_path = path.clone();
-                file_path.push("hello.txt");
-                let mut file = fs::File::create(file_path).await.expect("temp test file");
-                file.write_all(b"Hello, world!")
-                    .await
-                    .expect("temp test file write");
-
-                let mut subdir = path.clone();
-                subdir.push("subdir");
-                fs::create_dir(&subdir).await.expect("temp test subdir");
-
-                break path;
-            }
-        };
-
-        let root: DirLock<FileEnum> = load(path.clone(), 1000).await.expect("cache");
-        let lock = root.read().await;
-        assert_eq!(lock.len(), 2);
-        assert!(lock.get("hello").is_none());
-        let file = lock.get("hello.txt").expect("file");
-
-        tokio::fs::remove_dir_all(path)
-            .await
-            .expect("tmp test dir cleanup");
-    }
 }

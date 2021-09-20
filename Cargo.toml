@@ -11,10 +11,14 @@ readme = "README.md"
 categories = ["caching", "filesystem", "memory-management"]
 keywords = ["file", "io", "cache"]
 
+[[example]]
+name = "example"
+
 [dependencies]
+async-trait = "0.1"
 freqache = "0.4"
 futures = "0.3"
-tokio = { version = "1.11", features = ["fs", "io-util", "rt", "sync"] }
+tokio = { version = "1.11", features = ["fs", "io-util", "rt-multi-thread", "sync"] }
 
 [dev-dependencies]
 rand = "0.8"

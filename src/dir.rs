@@ -1,6 +1,5 @@
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
-use std::convert::TryFrom;
 use std::hash::Hash;
 use std::io;
 use std::ops::{Deref, DerefMut};
@@ -12,7 +11,7 @@ use futures::Future;
 use tokio::fs;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
-use crate::file::{File, FileEntry, FileLock};
+use crate::file::FileLock;
 use crate::Cache;
 
 #[derive(Clone)]
@@ -37,6 +36,7 @@ impl<FE> DirEntry<FE> {
     }
 }
 
+#[allow(unused)]
 pub struct Dir<FE> {
     path: PathBuf,
     cache: Arc<Cache>,
@@ -74,6 +74,34 @@ impl<FE> Dir<FE> {
             None
         } else {
             self.contents.get(name)
+        }
+    }
+
+    pub fn get_dir<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<&DirLock<FE>>
+    where
+        String: Borrow<Q>,
+    {
+        if self.deleted.contains(name.borrow()) {
+            None
+        } else {
+            match self.contents.get(name) {
+                Some(DirEntry::Dir(dir_lock)) => Some(dir_lock),
+                _ => None,
+            }
+        }
+    }
+
+    pub fn get_file<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<&FileLock<FE>>
+    where
+        String: Borrow<Q>,
+    {
+        if self.deleted.contains(name.borrow()) {
+            None
+        } else {
+            match self.contents.get(name) {
+                Some(DirEntry::File(file_lock)) => Some(file_lock),
+                _ => None,
+            }
         }
     }
 
