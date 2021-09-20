@@ -12,6 +12,8 @@ use tokio::sync::{
 
 use crate::Cache;
 
+const TMP: &'static str = "_freqfs";
+
 pub trait FileEntry<F> {
     fn expected() -> &'static str;
 
@@ -27,6 +29,8 @@ pub trait FileLoad: Sized {
         file: fs::File,
         metadata: std::fs::Metadata,
     ) -> Result<Self, io::Error>;
+
+    async fn save(&self, file: &mut fs::File) -> Result<u64, io::Error>;
 }
 
 enum FileState<FE> {
@@ -98,15 +102,7 @@ impl<FE> FileLock<FE> {
         let file_state = file_state.downgrade();
         match &*file_state {
             FileState::Pending => unreachable!(),
-            FileState::Read(size, contents) => {
-                self.inner
-                    .clone()
-                    .cache
-                    .insert(self.inner.path.clone(), *size);
-
-                Ok(contents.clone())
-            }
-            FileState::Modified(size, contents) => {
+            FileState::Read(size, contents) | FileState::Modified(size, contents) => {
                 self.inner
                     .clone()
                     .cache
@@ -148,6 +144,24 @@ impl<FE> FileLock<FE> {
                 )
             })
     }
+
+    pub async fn sync(&self) -> Result<(), io::Error>
+    where
+        FE: FileLoad,
+    {
+        let mut state = self.inner.contents.write().await;
+        let new_state = match &*state {
+            FileState::Pending => return Ok(()), // no-op
+            FileState::Read(_, lock) | FileState::Modified(_, lock) => {
+                let contents = lock.write().await;
+                let size = persist(self.inner.path.as_path(), &*contents).await?;
+                FileState::Read(size as usize, lock.clone())
+            }
+        };
+
+        *state = new_state;
+        Ok(())
+    }
 }
 
 pub struct FileReadGuard<FE, F> {
@@ -166,12 +180,6 @@ pub struct FileWriteGuard<FE, F> {
     guard: OwnedRwLockMappedWriteGuard<FE, F>,
 }
 
-impl<FE, F> FileWriteGuard<FE, F> {
-    pub fn sync(&self) -> Result<usize, io::Error> {
-        unimplemented!()
-    }
-}
-
 impl<FE, F> Deref for FileWriteGuard<FE, F> {
     type Target = F;
 
@@ -184,4 +192,39 @@ impl<FE, F> DerefMut for FileWriteGuard<FE, F> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.guard.deref_mut()
     }
+}
+
+async fn persist<FE: FileLoad>(path: &Path, file: &FE) -> Result<u64, io::Error> {
+    let tmp = path.with_extension(TMP);
+
+    let size = {
+        let mut tmp_file = if tmp.exists() {
+            fs::OpenOptions::new()
+                .truncate(true)
+                .write(true)
+                .open(tmp.as_path())
+                .await?
+        } else {
+            create_parent(tmp.as_path()).await?;
+            fs::File::create(tmp.as_path()).await?
+        };
+
+        let size = file.save(&mut tmp_file).await?;
+        tmp_file.sync_all().await?;
+        size
+    };
+
+    tokio::fs::rename(tmp.as_path(), path).await?;
+
+    Ok(size)
+}
+
+async fn create_parent(path: &Path) -> Result<(), io::Error> {
+    if let Some(parent) = path.parent() {
+        if !parent.exists() {
+            return tokio::fs::create_dir_all(parent).await;
+        }
+    }
+
+    Ok(())
 }

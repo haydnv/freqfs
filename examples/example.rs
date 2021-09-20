@@ -39,6 +39,21 @@ impl FileLoad for File {
             )),
         }
     }
+
+    async fn save(&self, file: &mut fs::File) -> Result<u64, io::Error> {
+        match self {
+            Self::Bin(bytes) => {
+                file.write_all(bytes).await?;
+                Ok(bytes.len() as u64)
+            }
+            Self::Text(text) => {
+                let bytes = text.as_bytes();
+                let size = bytes.len();
+                file.write_all(bytes).await?;
+                Ok(size as u64)
+            }
+        }
+    }
 }
 
 impl FileEntry<Vec<u8>> for File {
@@ -81,10 +96,9 @@ impl FileEntry<String> for File {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), io::Error> {
+async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
     let mut rng = rand::thread_rng();
-    let path = loop {
+    loop {
         let rand: u32 = rng.gen();
         let path = PathBuf::from(format!("/tmp/test_freqfs_{}", rand));
         if !path.exists() {
@@ -92,6 +106,7 @@ async fn main() -> Result<(), io::Error> {
 
             let mut file_path = path.clone();
             file_path.push("hello.txt");
+
             let mut file = fs::File::create(file_path).await?;
             file.write_all(b"Hello, world!").await?;
 
@@ -99,19 +114,34 @@ async fn main() -> Result<(), io::Error> {
             subdir.push("subdir");
             fs::create_dir(&subdir).await?;
 
-            break path;
+            break Ok(path);
         }
-    };
+    }
+}
 
-    let root: DirLock<File> = load(path.clone(), 1000).await?;
+#[tokio::main]
+async fn main() -> Result<(), io::Error> {
+    let path = setup_tmp_dir().await?;
+    let root: DirLock<File> = load(path.clone(), 15).await?;
 
     let lock = root.read().await;
     assert_eq!(lock.len(), 2);
     assert!(lock.get("hello").is_none());
 
     let file = lock.get_file("hello.txt").expect("file");
-    let contents: FileReadGuard<File, String> = file.read().await?;
-    assert_eq!(&*contents, "Hello, world!");
+
+    {
+        let mut contents: FileWriteGuard<File, String> = file.write().await?;
+        assert_eq!(&*contents, "Hello, world!");
+        *contents = "नमस्ते दुनिया!".to_string();
+    }
+
+    {
+        let contents: FileReadGuard<File, String> = file.read().await?;
+        assert_eq!(&*contents, "नमस्ते दुनिया!");
+    }
+
+    file.sync().await?;
 
     tokio::fs::remove_dir_all(path).await
 }
