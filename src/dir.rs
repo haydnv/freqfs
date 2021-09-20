@@ -5,8 +5,11 @@ use std::hash::Hash;
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use futures::Future;
+use tokio::fs;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::file::{File, FileEntry, FileLock};
@@ -81,8 +84,44 @@ pub struct DirLock<FE> {
 }
 
 impl<FE> DirLock<FE> {
-    pub(crate) async fn load(_cache: Arc<Cache>, _path: PathBuf) -> Result<Self, io::Error> {
-        unimplemented!()
+    pub(crate) fn load(
+        cache: Arc<Cache>,
+        path: PathBuf,
+    ) -> Pin<Box<dyn Future<Output = Result<Self, io::Error>>>> {
+        Box::pin(async move {
+            let mut contents = HashMap::new();
+            let mut handles = fs::read_dir(&path).await?;
+
+            while let Some(handle) = handles.next_entry().await? {
+                let name = handle.file_name().into_string().map_err(|os_str| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("OS string is not a valid Rust string: {:?}", os_str),
+                    )
+                })?;
+
+                let meta = handle.metadata().await?;
+                if meta.is_dir() {
+                    let subdirectory = Self::load(cache.clone(), handle.path()).await?;
+                    contents.insert(name, DirEntry::Dir(subdirectory));
+                } else if meta.is_file() {
+                    let file = FileLock::load(cache.clone(), handle.path());
+                    contents.insert(name, DirEntry::File(file));
+                } else {
+                    unreachable!("{:?} is neither a directory nor a file", handle.path());
+                }
+            }
+
+            let dir = Dir {
+                path,
+                cache,
+                contents,
+                deleted: HashSet::new(),
+            };
+
+            let inner = Arc::new(RwLock::new(dir));
+            Ok(DirLock { inner })
+        })
     }
 
     pub async fn read(&self) -> DirReadGuard<FE> {

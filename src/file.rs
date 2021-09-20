@@ -33,6 +33,18 @@ pub struct FileLock<FE> {
 }
 
 impl<FE> FileLock<FE> {
+    pub(crate) fn load(cache: Arc<Cache>, path: PathBuf) -> Self {
+        let inner = Inner {
+            cache,
+            path,
+            contents: RwLock::new(FileState::Pending),
+        };
+
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
     pub async fn read<F, E>(&self) -> Option<FileReadGuard<F>>
     where
         FE: FileEntry<F>,

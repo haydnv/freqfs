@@ -13,4 +13,5 @@ keywords = ["file", "io", "cache"]
 
 [dependencies]
 freqache = "0.4"
-tokio = { version = "1.11", features = ["rt", "sync"] }
+futures = "0.3"
+tokio = { version = "1.11", features = ["fs", "rt", "sync"] }
