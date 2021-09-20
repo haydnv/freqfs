@@ -76,6 +76,19 @@ impl<FE> Dir<FE> {
             self.contents.get(name)
         }
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &DirEntry<FE>)> {
+        self.contents
+            .iter()
+            .filter(move |(name, _)| !self.deleted.contains(*name))
+    }
+
+    pub fn len(&self) -> usize {
+        self.contents
+            .keys()
+            .filter(|name| !self.deleted.contains(*name))
+            .count()
+    }
 }
 
 #[derive(Clone)]

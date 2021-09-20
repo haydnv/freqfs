@@ -14,7 +14,7 @@ keywords = ["file", "io", "cache"]
 [dependencies]
 freqache = "0.4"
 futures = "0.3"
-tokio = { version = "1.11", features = ["fs", "rt", "sync"] }
+tokio = { version = "1.11", features = ["fs", "io-util", "rt", "sync"] }
 
 [dev-dependencies]
 rand = "0.8"

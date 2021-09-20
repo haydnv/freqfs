@@ -44,6 +44,7 @@ impl Cache {
     fn new(capacity: usize, tx: mpsc::UnboundedSender<Evict>) -> Self {
         let size = Mutex::new(0);
         let lfu = LFU::new();
+
         Self {
             lfu,
             size,
@@ -73,6 +74,8 @@ mod tests {
     use super::*;
     use rand::Rng;
     use std::path::PathBuf;
+    use tokio::fs;
+    use tokio::io::AsyncWriteExt;
 
     #[allow(unused)]
     enum FileEnum {
@@ -119,12 +122,28 @@ mod tests {
             let rand: u32 = rng.gen();
             let path = PathBuf::from(format!("/tmp/test_freqfs_{}", rand));
             if !path.exists() {
-                tokio::fs::create_dir(&path).await.expect("tmp test dir");
+                fs::create_dir(&path).await.expect("tmp test dir");
+
+                let mut file_path = path.clone();
+                file_path.push("hello.txt");
+                let mut file = fs::File::create(file_path).await.expect("temp test file");
+                file.write_all(b"Hello, world!")
+                    .await
+                    .expect("temp test file write");
+
+                let mut subdir = path.clone();
+                subdir.push("subdir");
+                fs::create_dir(&subdir).await.expect("temp test subdir");
+
                 break path;
             }
         };
 
-        load::<FileEnum>(path.clone(), 1000).await.expect("cache");
+        let root: DirLock<FileEnum> = load(path.clone(), 1000).await.expect("cache");
+        let lock = root.read().await;
+        assert_eq!(lock.len(), 2);
+        assert!(lock.get("hello").is_none());
+        let file = lock.get("hello.txt").expect("file");
 
         tokio::fs::remove_dir_all(path)
             .await
