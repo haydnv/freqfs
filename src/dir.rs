@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::Future;
+use futures::future::Future;
+use futures::stream::{FuturesUnordered, TryStreamExt};
 use tokio::fs;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
@@ -91,9 +92,10 @@ impl<FE> Dir<FE> {
     /// Delete the entry with the given `name` from this `Dir`.
     ///
     /// Returns `true` if the given `name` was present.
-    pub fn delete<Q: AsRef<String>>(&mut self, name: Q) -> bool {
-        self.deleted.insert(name.as_ref().to_owned());
-        self.contents.contains_key(name.as_ref())
+    pub fn delete(&mut self, name: String) -> bool {
+        let exists = self.contents.contains_key(&name);
+        self.deleted.insert(name);
+        exists
     }
 
     /// Get the entry with the given `name` from this `Dir`.
@@ -238,6 +240,69 @@ impl<FE> DirLock<FE> {
     pub async fn write(&self) -> DirWriteGuard<FE> {
         let guard = self.inner.clone().write_owned().await;
         DirWriteGuard { guard }
+    }
+
+    /// Synchronize this directory with the filesystem.
+    ///
+    /// This will delete files and create subdirectories on the filesystem,
+    /// but it will not synchronize any file contents.
+    pub async fn sync(&self, err_if_locked: bool) -> Result<(), io::Error> {
+        let mut dir = if err_if_locked {
+            self.inner
+                .try_write()
+                .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))?
+        } else {
+            self.inner.write().await
+        };
+
+        let path = dir.path.clone();
+        let deleted: Vec<String> = dir.deleted.drain().collect();
+        let mut sync_deletes: FuturesUnordered<_> = deleted
+            .into_iter()
+            .filter_map(|name| dir.contents.remove(&name).map(|entry| (name, entry)))
+            .filter_map(|(name, entry)| {
+                let mut path = path.clone();
+                path.push(name);
+
+                if path.exists() {
+                    Some(async move {
+                        match entry {
+                            DirEntry::Dir(_) => fs::remove_dir_all(path).await,
+                            DirEntry::File(_) => fs::remove_file(path).await,
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        while let Some(()) = sync_deletes.try_next().await? {
+            // nothing to do
+        }
+
+        let mut sync_creates: FuturesUnordered<_> = dir
+            .contents
+            .iter()
+            .filter_map(|(name, entry)| {
+                if entry.as_dir().is_some() {
+                    let mut path = path.clone();
+                    path.push(name);
+
+                    if !path.exists() {
+                        return Some(fs::create_dir_all(path));
+                    }
+                }
+
+                None
+            })
+            .collect();
+
+        while let Some(()) = sync_creates.try_next().await? {
+            // nothing to do
+        }
+
+        Ok(())
     }
 }
 

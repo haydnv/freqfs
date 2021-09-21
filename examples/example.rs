@@ -1,10 +1,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::Future;
 use rand::Rng;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -111,24 +109,6 @@ impl From<Vec<u8>> for File {
     }
 }
 
-fn cleanup_tmp_dir(path: PathBuf) -> Pin<Box<dyn Future<Output = Result<(), io::Error>>>> {
-    Box::pin(async move {
-        let mut contents = fs::read_dir(path.as_path()).await?;
-        while let Some(entry) = contents.next_entry().await? {
-            let path = entry.path();
-
-            if entry.file_type().await?.is_dir() {
-                cleanup_tmp_dir(entry.path()).await?;
-            } else {
-                fs::remove_file(path).await?;
-            }
-        }
-
-        tokio::fs::remove_dir_all(path).await?;
-        Ok(())
-    })
-}
-
 async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
     let mut rng = rand::thread_rng();
     loop {
@@ -153,7 +133,7 @@ async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
 }
 
 async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
-    let root = cache.read().await;
+    let mut root = cache.write().await;
 
     assert_eq!(root.len(), 2);
     assert!(root.get("hello").is_none());
@@ -217,6 +197,19 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
     // so the contents of "vector.bin" will be automatically sync'd and removed from main memory
     tokio::time::sleep(Duration::from_millis(15)).await;
 
+    // deleting is a synchronous operation operation since it happens in-memory only
+    assert!(root.delete("hello.txt".to_string()));
+    assert!(root.get("hello.txt").is_none());
+    assert!(root.delete("subdir".to_string()));
+    assert!(root.get("subdir").is_none());
+
+    // but we can explicitly sync to delete the file on the filesystem
+    std::mem::drop(root); // make sure to drop the write lock first
+    cache.sync(true).await?;
+
+    // note that the delete happened even though `sub_dir` is still locked
+    // so any writes to a file in `sub_dir` will re-create `sub_dir`
+
     Ok(())
 }
 
@@ -232,5 +225,13 @@ async fn main() -> Result<(), io::Error> {
 
     run_example(root).await?;
 
-    cleanup_tmp_dir(path).await
+    let mut txt_file_path = path.clone();
+    txt_file_path.push("hello.txt");
+    assert!(!txt_file_path.exists());
+
+    let mut sub_dir_path = path.clone();
+    sub_dir_path.push("subdir");
+    assert!(!sub_dir_path.exists());
+
+    fs::remove_dir(path).await
 }

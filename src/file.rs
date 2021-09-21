@@ -214,23 +214,22 @@ impl<FE> FileLock<FE> {
     where
         FE: FileLoad,
     {
-        let mut state = if err_if_locked {
-            self.inner
-                .contents
-                .try_write()
-                .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))?
-        } else {
-            self.inner.contents.write().await
-        };
+        let mut state = self.inner.contents.write().await;
 
         let new_state = match &*state {
-            FileState::Pending => return Ok(()), // no-op
-            FileState::Read(old_size, lock) | FileState::Modified(old_size, lock) => {
-                let contents = lock.write().await;
+            FileState::Modified(old_size, lock) => {
+                let contents = if err_if_locked {
+                    lock.try_write()
+                        .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))?
+                } else {
+                    lock.write().await
+                };
+
                 let new_size = persist(self.inner.path.as_path(), &*contents).await?;
                 self.inner.cache.resize(*old_size, new_size as usize);
                 FileState::Read(new_size as usize, lock.clone())
             }
+            _ => return Ok(()), // no-op
         };
 
         *state = new_state;
