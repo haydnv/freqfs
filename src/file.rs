@@ -11,6 +11,7 @@ use tokio::sync::{
 };
 
 use crate::Cache;
+use futures::Future;
 
 const TMP: &'static str = "_freqfs";
 
@@ -50,26 +51,63 @@ impl<FE> FileState<FE> {
 }
 
 struct Inner<FE> {
-    cache: Arc<Cache>,
+    cache: Arc<Cache<FE>>,
     path: PathBuf,
-    contents: RwLock<FileState<FE>>,
+    contents: Arc<RwLock<FileState<FE>>>,
 }
 
-#[derive(Clone)]
 pub struct FileLock<FE> {
     inner: Arc<Inner<FE>>,
 }
 
+impl<FE> Clone for FileLock<FE> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 impl<FE> FileLock<FE> {
-    pub(crate) fn load(cache: Arc<Cache>, path: PathBuf) -> Self {
+    pub(crate) fn new<F>(cache: Arc<Cache<FE>>, path: PathBuf, file: F, size: usize) -> Self
+    where
+        FE: From<F>,
+    {
+        let lock = Arc::new(RwLock::new(file.into()));
+        let state = FileState::Modified(size, lock);
         let inner = Inner {
             cache,
             path,
-            contents: RwLock::new(FileState::Pending),
+            contents: Arc::new(RwLock::new(state)),
         };
 
         Self {
             inner: Arc::new(inner),
+        }
+    }
+
+    pub(crate) fn load(cache: Arc<Cache<FE>>, path: PathBuf) -> Self {
+        let inner = Inner {
+            cache,
+            path,
+            contents: Arc::new(RwLock::new(FileState::Pending)),
+        };
+
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+
+    pub(crate) fn ref_count(&self) -> usize {
+        Arc::strong_count(&self.inner)
+    }
+
+    pub(crate) fn size(&self) -> Option<usize> {
+        let state = self.inner.contents.try_read().ok()?;
+        match &*state {
+            FileState::Pending => None,
+            FileState::Read(size, _) => Some(*size),
+            FileState::Modified(size, _) => Some(*size),
         }
     }
 
@@ -106,7 +144,7 @@ impl<FE> FileLock<FE> {
                 self.inner
                     .clone()
                     .cache
-                    .insert(self.inner.path.clone(), *size);
+                    .insert(self.inner.path.clone(), self.clone(), *size);
 
                 Ok(contents.clone())
             }
@@ -120,7 +158,10 @@ impl<FE> FileLock<FE> {
         let contents = self.get_lock().await?;
         let guard = contents.read_owned().await;
         OwnedRwLockReadGuard::try_map(guard, |entry| entry.as_file())
-            .map(|guard| FileReadGuard { guard })
+            .map(|guard| {
+                let rc = self.inner.clone();
+                FileReadGuard { rc, guard }
+            })
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -136,7 +177,10 @@ impl<FE> FileLock<FE> {
         let contents = self.get_lock().await?;
         let guard = contents.write_owned().await;
         OwnedRwLockWriteGuard::try_map(guard, |entry| entry.as_file_mut())
-            .map(|guard| FileWriteGuard { guard })
+            .map(|guard| {
+                let rc = self.inner.clone();
+                FileWriteGuard { rc, guard }
+            })
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -152,19 +196,48 @@ impl<FE> FileLock<FE> {
         let mut state = self.inner.contents.write().await;
         let new_state = match &*state {
             FileState::Pending => return Ok(()), // no-op
-            FileState::Read(_, lock) | FileState::Modified(_, lock) => {
+            FileState::Read(old_size, lock) | FileState::Modified(old_size, lock) => {
                 let contents = lock.write().await;
-                let size = persist(self.inner.path.as_path(), &*contents).await?;
-                FileState::Read(size as usize, lock.clone())
+                let new_size = persist(self.inner.path.as_path(), &*contents).await?;
+                self.inner.cache.resize(*old_size, new_size as usize);
+                FileState::Read(new_size as usize, lock.clone())
             }
         };
 
         *state = new_state;
         Ok(())
     }
+
+    pub(crate) fn evict(self) -> Option<impl Future<Output = Result<(), io::Error>>>
+    where
+        FE: FileLoad + 'static,
+    {
+        // there's one ref in the Cache, one in the parent Dir, and one in this struct
+        if self.ref_count() > 3 {
+            return None;
+        }
+
+        let mut state = self.inner.contents.clone().try_write_owned().ok()?;
+
+        Some(async move {
+            match &*state {
+                FileState::Pending => return Ok(()), // no-op
+                FileState::Read(old_size, lock) | FileState::Modified(old_size, lock) => {
+                    let contents = lock.write().await;
+                    persist(self.inner.path.as_path(), &*contents).await?;
+                    self.inner.cache.remove(&self.inner.path, *old_size);
+                }
+            };
+
+            *state = FileState::Pending;
+            Ok(())
+        })
+    }
 }
 
 pub struct FileReadGuard<FE, F> {
+    #[allow(unused)]
+    rc: Arc<Inner<FE>>,
     guard: OwnedRwLockReadGuard<FE, F>,
 }
 
@@ -177,6 +250,8 @@ impl<FE, F> Deref for FileReadGuard<FE, F> {
 }
 
 pub struct FileWriteGuard<FE, F> {
+    #[allow(unused)]
+    rc: Arc<Inner<FE>>,
     guard: OwnedRwLockMappedWriteGuard<FE, F>,
 }
 

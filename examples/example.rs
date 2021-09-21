@@ -1,7 +1,10 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::Future;
 use rand::Rng;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -57,6 +60,10 @@ impl FileLoad for File {
 }
 
 impl FileEntry<Vec<u8>> for File {
+    fn expected() -> &'static str {
+        "a binary file"
+    }
+
     fn as_file(&self) -> Option<&Vec<u8>> {
         match self {
             Self::Bin(bytes) => Some(bytes),
@@ -70,13 +77,13 @@ impl FileEntry<Vec<u8>> for File {
             _ => None,
         }
     }
-
-    fn expected() -> &'static str {
-        "a binary file"
-    }
 }
 
 impl FileEntry<String> for File {
+    fn expected() -> &'static str {
+        "a text file"
+    }
+
     fn as_file(&self) -> Option<&String> {
         match self {
             Self::Text(text) => Some(text),
@@ -90,10 +97,36 @@ impl FileEntry<String> for File {
             _ => None,
         }
     }
+}
 
-    fn expected() -> &'static str {
-        "a text file"
+impl From<String> for File {
+    fn from(text: String) -> Self {
+        Self::Text(text)
     }
+}
+
+impl From<Vec<u8>> for File {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::Bin(bytes)
+    }
+}
+
+fn cleanup_tmp_dir(path: PathBuf) -> Pin<Box<dyn Future<Output = Result<(), io::Error>>>> {
+    Box::pin(async move {
+        let mut contents = fs::read_dir(path.as_path()).await?;
+        while let Some(entry) = contents.next_entry().await? {
+            let path = entry.path();
+
+            if entry.file_type().await?.is_dir() {
+                cleanup_tmp_dir(entry.path()).await?;
+            } else {
+                fs::remove_file(path).await?;
+            }
+        }
+
+        tokio::fs::remove_dir_all(path).await?;
+        Ok(())
+    })
 }
 
 async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
@@ -119,29 +152,79 @@ async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
     }
 }
 
+async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
+    let root = cache.read().await;
+
+    assert_eq!(root.len(), 2);
+    assert!(root.get("hello").is_none());
+
+    {
+        let text_file = root.get_file("hello.txt").expect("text file");
+
+        {
+            // to load a file into memory, acquire a lock on its contents
+            let mut contents: FileWriteGuard<File, String> = text_file.write().await?;
+            assert_eq!(&*contents, "Hello, world!");
+
+            // then they can be mutated purely in-memory
+            *contents = "नमस्ते दुनिया!".to_string();
+        }
+
+        {
+            let contents: FileReadGuard<File, String> = text_file.read().await?;
+            assert_eq!(&*contents, "नमस्ते दुनिया!");
+        }
+
+        // trigger an explicit sync of the new contents, without removing them from memory
+        // this will update the cache with the new file size
+        //
+        // IMPORTANT: sync acquires a write lock on the file contents
+        // so it's easy to create a deadlock by calling `sync` explicitly
+        text_file.sync().await?;
+    }
+
+    let mut subdir = root.get_dir("subdir").expect("subdirectory").write().await;
+
+    // create a new directory
+    // this is a synchronous operation since it happens in-memory
+    let subsubdir = subdir.create_dir("sub-subdir".to_string())?;
+
+    // keep this FileLock around so its data won't be evicted
+    let binary_file = subsubdir.write().await.create_file(
+        "vector.bin".to_string(),
+        (0..25).collect::<Vec<u8>>(),
+        Some(25),
+    )?;
+
+    // now the cache is full, so the contents of "hello.txt" will be automatically sync'd
+    // and removed from main memory
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // dropping "vector.bin" will allow its contents to be removed from the in-memory cache
+    std::mem::drop(binary_file);
+
+    // so loading "hello.txt" again will cause "vector.bin" to be sync'd and removed from memory
+    let text_file = root.get_file("hello.txt").expect("text file");
+
+    let contents: FileReadGuard<File, String> = text_file.read().await?;
+    assert_eq!(&*contents, "नमस्ते दुनिया!");
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), io::Error> {
     let path = setup_tmp_dir().await?;
-    let root: DirLock<File> = load(path.clone(), 15).await?;
 
-    let lock = root.read().await;
-    assert_eq!(lock.len(), 2);
-    assert!(lock.get("hello").is_none());
+    // load the cache into memory
+    // this only loads directory and file paths into memory, not file contents
+    // all I/O under the cache directory at `path` MUST now go through the cache methods
+    // otherwise concurrent filesystem access may cause errors
+    let root = load(path.clone(), 40).await?;
+    run_example(root).await?;
 
-    let file = lock.get_file("hello.txt").expect("file");
+    // let cache eviction run before cleaning up, to avoid concurrent access issues
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    {
-        let mut contents: FileWriteGuard<File, String> = file.write().await?;
-        assert_eq!(&*contents, "Hello, world!");
-        *contents = "नमस्ते दुनिया!".to_string();
-    }
-
-    {
-        let contents: FileReadGuard<File, String> = file.read().await?;
-        assert_eq!(&*contents, "नमस्ते दुनिया!");
-    }
-
-    file.sync().await?;
-
-    tokio::fs::remove_dir_all(path).await
+    cleanup_tmp_dir(path).await
 }

@@ -36,29 +36,51 @@ impl<FE> DirEntry<FE> {
     }
 }
 
-#[allow(unused)]
 pub struct Dir<FE> {
     path: PathBuf,
-    cache: Arc<Cache>,
+    cache: Arc<Cache<FE>>,
     contents: HashMap<String, DirEntry<FE>>,
     deleted: HashSet<String>,
 }
 
 impl<FE> Dir<FE> {
-    pub fn create_dir<F, Q>(&mut self, _name: Q) -> Result<DirLock<FE>, io::Error>
-    where
-        FE: From<F>,
-        Q: AsRef<String>,
-    {
-        unimplemented!()
+    pub fn create_dir(&mut self, name: String) -> Result<DirLock<FE>, io::Error> {
+        if !self.deleted.remove(&name) {
+            if self.contents.contains_key(&name) {
+                return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
+            }
+        }
+
+        let mut path = self.path.clone();
+        path.push(&name);
+        let lock = DirLock::new(self.cache.clone(), path);
+        self.contents.insert(name, DirEntry::Dir(lock.clone()));
+        Ok(lock)
     }
 
-    pub fn create_file<F, Q>(&mut self, _name: Q, _file: F) -> Result<FileLock<FE>, io::Error>
+    pub fn create_file<F>(
+        &mut self,
+        name: String,
+        file: F,
+        size_hint: Option<usize>,
+    ) -> Result<FileLock<FE>, io::Error>
     where
         FE: From<F>,
-        Q: AsRef<String>,
     {
-        unimplemented!()
+        if !self.deleted.remove(&name) {
+            if self.contents.contains_key(&name) {
+                return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
+            }
+        }
+
+        let mut path = self.path.clone();
+        path.push(&name);
+
+        let size = size_hint.unwrap_or_default();
+        let lock = FileLock::new(self.cache.clone(), path.clone(), file, size);
+        self.contents.insert(name, DirEntry::File(lock.clone()));
+        self.cache.insert(path, lock.clone(), size);
+        Ok(lock)
     }
 
     pub fn delete<Q: AsRef<String>>(&mut self, name: Q) -> bool {
@@ -119,16 +141,39 @@ impl<FE> Dir<FE> {
     }
 }
 
-#[derive(Clone)]
 pub struct DirLock<FE> {
     inner: Arc<RwLock<Dir<FE>>>,
 }
 
+impl<FE> Clone for DirLock<FE> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 impl<FE> DirLock<FE> {
-    pub(crate) fn load(
-        cache: Arc<Cache>,
+    fn new(cache: Arc<Cache<FE>>, path: PathBuf) -> Self {
+        let dir = Dir {
+            path,
+            cache,
+            contents: HashMap::new(),
+            deleted: HashSet::new(),
+        };
+
+        Self {
+            inner: Arc::new(RwLock::new(dir)),
+        }
+    }
+
+    pub(crate) fn load<'a>(
+        cache: Arc<Cache<FE>>,
         path: PathBuf,
-    ) -> Pin<Box<dyn Future<Output = Result<Self, io::Error>>>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Self, io::Error>> + 'a>>
+    where
+        FE: 'a,
+    {
         Box::pin(async move {
             let mut contents = HashMap::new();
             let mut handles = fs::read_dir(&path).await?;
