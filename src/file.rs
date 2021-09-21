@@ -279,7 +279,11 @@ impl<FE, F> DerefMut for FileWriteGuard<FE, F> {
 }
 
 async fn persist<FE: FileLoad>(path: &Path, file: &FE) -> Result<u64, io::Error> {
-    let tmp = path.with_extension(TMP);
+    let tmp = if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+        path.with_extension(format!("{}_{}", ext, TMP))
+    } else {
+        path.with_extension(TMP)
+    };
 
     let size = {
         let mut tmp_file = if tmp.exists() {
