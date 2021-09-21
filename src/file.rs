@@ -172,10 +172,7 @@ impl<FE> FileLock<FE> {
         let contents = self.get_lock().await?;
         let guard = contents.read_owned().await;
         OwnedRwLockReadGuard::try_map(guard, |entry| entry.as_file())
-            .map(|guard| {
-                let rc = self.inner.clone();
-                FileReadGuard { rc, guard }
-            })
+            .map(|guard| FileReadGuard { guard })
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -192,10 +189,7 @@ impl<FE> FileLock<FE> {
         let contents = self.get_lock().await?;
         let guard = contents.write_owned().await;
         OwnedRwLockWriteGuard::try_map(guard, |entry| entry.as_file_mut())
-            .map(|guard| {
-                let rc = self.inner.clone();
-                FileWriteGuard { rc, guard }
-            })
+            .map(|guard| FileWriteGuard { guard })
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -256,8 +250,6 @@ impl<FE> FileLock<FE> {
 
 /// A read lock on a file with data type `F`.
 pub struct FileReadGuard<FE, F> {
-    #[allow(unused)]
-    rc: Arc<Inner<FE>>,
     guard: OwnedRwLockReadGuard<FE, F>,
 }
 
@@ -271,8 +263,6 @@ impl<FE, F> Deref for FileReadGuard<FE, F> {
 
 /// A write lock on a file with data type `F`.
 pub struct FileWriteGuard<FE, F> {
-    #[allow(unused)]
-    rc: Arc<Inner<FE>>,
     guard: OwnedRwLockMappedWriteGuard<FE, F>,
 }
 
