@@ -14,6 +14,7 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use crate::file::FileLock;
 use crate::Cache;
 
+/// A directory entry, either a [`FileLock`] or a sub-[`DirLock`].
 #[derive(Clone)]
 pub enum DirEntry<FE> {
     Dir(DirLock<FE>),
@@ -21,6 +22,7 @@ pub enum DirEntry<FE> {
 }
 
 impl<FE> DirEntry<FE> {
+    /// return `Some(dir_lock)` if this `DirEntry` is itself a directory.
     pub fn as_dir(&self) -> Option<&DirLock<FE>> {
         match self {
             Self::Dir(dir) => Some(dir),
@@ -28,6 +30,7 @@ impl<FE> DirEntry<FE> {
         }
     }
 
+    /// return `Some(file_lock)` if this `DirEntry` is itself a file.
     pub fn as_file(&self) -> Option<&FileLock<FE>> {
         match self {
             Self::File(file) => Some(file),
@@ -44,6 +47,7 @@ pub struct Dir<FE> {
 }
 
 impl<FE> Dir<FE> {
+    /// Create and return a new subdirectory of this `Dir`.
     pub fn create_dir(&mut self, name: String) -> Result<DirLock<FE>, io::Error> {
         if !self.deleted.remove(&name) {
             if self.contents.contains_key(&name) {
@@ -58,10 +62,11 @@ impl<FE> Dir<FE> {
         Ok(lock)
     }
 
+    /// Create a new file in this `Dir` with the given `contents`.
     pub fn create_file<F>(
         &mut self,
         name: String,
-        file: F,
+        contents: F,
         size_hint: Option<usize>,
     ) -> Result<FileLock<FE>, io::Error>
     where
@@ -77,17 +82,21 @@ impl<FE> Dir<FE> {
         path.push(&name);
 
         let size = size_hint.unwrap_or_default();
-        let lock = FileLock::new(self.cache.clone(), path.clone(), file, size);
+        let lock = FileLock::new(self.cache.clone(), path.clone(), contents, size);
         self.contents.insert(name, DirEntry::File(lock.clone()));
         self.cache.insert(path, lock.clone(), size);
         Ok(lock)
     }
 
+    /// Delete the entry with the given `name` from this `Dir`.
+    ///
+    /// Returns `true` if the given `name` was present.
     pub fn delete<Q: AsRef<String>>(&mut self, name: Q) -> bool {
         self.deleted.insert(name.as_ref().to_owned());
         self.contents.contains_key(name.as_ref())
     }
 
+    /// Get the entry with the given `name` from this `Dir`.
     pub fn get<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<&DirEntry<FE>>
     where
         String: Borrow<Q>,
@@ -99,7 +108,10 @@ impl<FE> Dir<FE> {
         }
     }
 
-    pub fn get_dir<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<DirLock<FE>>
+    /// Get the subdirectory with the given `name` from this `Dir`, if present.
+    ///
+    /// Also returns `None` if the entry at `name` is a file.
+    pub fn get_dir<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<&DirLock<FE>>
     where
         String: Borrow<Q>,
     {
@@ -107,12 +119,15 @@ impl<FE> Dir<FE> {
             None
         } else {
             match self.contents.get(name) {
-                Some(DirEntry::Dir(dir_lock)) => Some(dir_lock.clone()),
+                Some(DirEntry::Dir(dir_lock)) => Some(dir_lock),
                 _ => None,
             }
         }
     }
 
+    /// Get the file with the given `name` from this `Dir`, if present.
+    ///
+    /// Also returns `None` if the entry at `name` is a directory.
     pub fn get_file<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<FileLock<FE>>
     where
         String: Borrow<Q>,
@@ -127,12 +142,14 @@ impl<FE> Dir<FE> {
         }
     }
 
+    /// Return an [`Iterator`] over the entries in this `Dir`.
     pub fn iter(&self) -> impl Iterator<Item = (&String, &DirEntry<FE>)> {
         self.contents
             .iter()
             .filter(move |(name, _)| !self.deleted.contains(*name))
     }
 
+    /// Return the number of entries in this `Dir`.
     pub fn len(&self) -> usize {
         self.contents
             .keys()
@@ -141,6 +158,7 @@ impl<FE> Dir<FE> {
     }
 }
 
+/// A clone-able wrapper type over a [`tokio::sync::RwLock`] on a directory.
 pub struct DirLock<FE> {
     inner: Arc<RwLock<Dir<FE>>>,
 }
@@ -210,17 +228,20 @@ impl<FE> DirLock<FE> {
         })
     }
 
+    /// Lock this directory for reading.
     pub async fn read(&self) -> DirReadGuard<FE> {
         let guard = self.inner.clone().read_owned().await;
         DirReadGuard { guard }
     }
 
+    /// Lock this directory for writing.
     pub async fn write(&self) -> DirWriteGuard<FE> {
         let guard = self.inner.clone().write_owned().await;
         DirWriteGuard { guard }
     }
 }
 
+/// A read lock on a directory.
 pub struct DirReadGuard<FE> {
     guard: OwnedRwLockReadGuard<Dir<FE>>,
 }
@@ -233,14 +254,9 @@ impl<FE> Deref for DirReadGuard<FE> {
     }
 }
 
+/// A write lock on a directory.
 pub struct DirWriteGuard<FE> {
     guard: OwnedRwLockWriteGuard<Dir<FE>>,
-}
-
-impl<FE> DirWriteGuard<FE> {
-    pub async fn sync(&self) -> Result<(), io::Error> {
-        unimplemented!()
-    }
 }
 
 impl<FE> Deref for DirWriteGuard<FE> {

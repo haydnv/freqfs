@@ -204,7 +204,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
 
     // now the cache is full, so the contents of "hello.txt" will be automatically sync'd
     // and removed from main memory
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_millis(15)).await;
 
     // dropping "vector.bin" will allow its contents to be removed from the in-memory cache
     std::mem::drop(binary_file);
@@ -215,7 +215,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
     assert_eq!(&*contents, "नमस्ते दुनिया!");
 
     // so the contents of "vector.bin" will be automatically sync'd and removed from main memory
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_millis(15)).await;
 
     Ok(())
 }
@@ -228,7 +228,7 @@ async fn main() -> Result<(), io::Error> {
     // this only loads directory and file paths into memory, not file contents
     // all I/O under the cache directory at `path` MUST now go through the cache methods
     // otherwise concurrent filesystem access may cause errors
-    let root = load(path.clone(), 40, Duration::from_secs(1)).await?;
+    let root = load(path.clone(), 40, Duration::from_millis(10)).await?;
 
     run_example(root).await?;
 

@@ -5,16 +5,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::Future;
 use tokio::fs;
 use tokio::sync::{
     OwnedRwLockMappedWriteGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock,
 };
 
 use crate::Cache;
-use futures::Future;
 
 const TMP: &'static str = "_freqfs";
 
+/// Conversion methods from a container type (such as an `enum`) and file data.
 pub trait FileEntry<F> {
     fn expected() -> &'static str;
 
@@ -23,6 +24,7 @@ pub trait FileEntry<F> {
     fn as_file_mut(&mut self) -> Option<&mut F>;
 }
 
+/// Load & save methods for a file data container type.
 #[async_trait]
 pub trait FileLoad: Sized {
     async fn load(
@@ -70,6 +72,7 @@ struct Inner<FE> {
     contents: Arc<RwLock<FileState<FE>>>,
 }
 
+/// A clone-able wrapper over a [`tokio::sync::RwLock`] on a file container.
 pub struct FileLock<FE> {
     inner: Arc<Inner<FE>>,
 }
@@ -161,6 +164,7 @@ impl<FE> FileLock<FE> {
         }
     }
 
+    /// Lock this file for reading.
     pub async fn read<F>(&self) -> Result<FileReadGuard<FE, F>, io::Error>
     where
         FE: FileLoad + FileEntry<F>,
@@ -180,6 +184,7 @@ impl<FE> FileLock<FE> {
             })
     }
 
+    /// Lock this file for writing.
     pub async fn write<F>(&self) -> Result<FileWriteGuard<FE, F>, io::Error>
     where
         FE: FileLoad + FileEntry<F>,
@@ -199,6 +204,12 @@ impl<FE> FileLock<FE> {
             })
     }
 
+    /// Back up this file's contents to the filesystem.
+    ///
+    /// This method acquires a write lock on the file contents, so it can deadlock
+    /// if there is already a lock on the file contents.
+    ///
+    /// Pass `true` to error out if there is already a lock on the file contents.
     pub async fn sync(&self, err_if_locked: bool) -> Result<(), io::Error>
     where
         FE: FileLoad,
@@ -244,6 +255,7 @@ impl<FE> FileLock<FE> {
     }
 }
 
+/// A read lock on a file with data type `F`.
 pub struct FileReadGuard<FE, F> {
     #[allow(unused)]
     rc: Arc<Inner<FE>>,
@@ -258,6 +270,7 @@ impl<FE, F> Deref for FileReadGuard<FE, F> {
     }
 }
 
+/// A write lock on a file with data type `F`.
 pub struct FileWriteGuard<FE, F> {
     #[allow(unused)]
     rc: Arc<Inner<FE>>,
