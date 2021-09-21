@@ -180,34 +180,42 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
         //
         // IMPORTANT: sync acquires a write lock on the file contents
         // so it's easy to create a deadlock by calling `sync` explicitly
-        text_file.sync().await?;
+        // pass `true` to error out if there's already a lock on the file contents
+        text_file.sync(true).await?;
     }
 
-    let mut subdir = root.get_dir("subdir").expect("subdirectory").write().await;
+    let mut sub_dir = root.get_dir("subdir").expect("subdirectory").write().await;
 
     // create a new directory
-    // this is a synchronous operation since it happens in-memory
-    let subsubdir = subdir.create_dir("sub-subdir".to_string())?;
+    // this is a synchronous operation since it happens in-memory only
+    let sub_sub_dir = sub_dir.create_dir("sub-subdir".to_string())?;
+    let mut sub_sub_dir = sub_sub_dir.write().await;
 
-    // keep this FileLock around so its data won't be evicted
-    let binary_file = subsubdir.write().await.create_file(
+    // create a new file "vector.bin"
+    // this is a synchronous operation since it happens in-memory only
+    let binary_file = sub_sub_dir.create_file(
         "vector.bin".to_string(),
         (0..25).collect::<Vec<u8>>(),
         Some(25),
     )?;
 
+    // then lock it so its data won't be evicted
+    let binary_file: FileReadGuard<File, Vec<u8>> = binary_file.read().await?;
+
     // now the cache is full, so the contents of "hello.txt" will be automatically sync'd
     // and removed from main memory
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
 
     // dropping "vector.bin" will allow its contents to be removed from the in-memory cache
     std::mem::drop(binary_file);
 
-    // so loading "hello.txt" again will cause "vector.bin" to be sync'd and removed from memory
+    // then loading "hello.txt" again will fill the cache
     let text_file = root.get_file("hello.txt").expect("text file");
-
     let contents: FileReadGuard<File, String> = text_file.read().await?;
     assert_eq!(&*contents, "नमस्ते दुनिया!");
+
+    // so the contents of "vector.bin" will be automatically sync'd and removed from main memory
+    tokio::time::sleep(Duration::from_millis(1500)).await;
 
     Ok(())
 }
@@ -220,11 +228,9 @@ async fn main() -> Result<(), io::Error> {
     // this only loads directory and file paths into memory, not file contents
     // all I/O under the cache directory at `path` MUST now go through the cache methods
     // otherwise concurrent filesystem access may cause errors
-    let root = load(path.clone(), 40).await?;
-    run_example(root).await?;
+    let root = load(path.clone(), 40, Duration::from_secs(1)).await?;
 
-    // let cache eviction run before cleaning up, to avoid concurrent access issues
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    run_example(root).await?;
 
     cleanup_tmp_dir(path).await
 }

@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::mpsc;
 
 mod dir;
 mod file;
@@ -13,8 +13,6 @@ pub use dir::{DirEntry, DirLock, DirReadGuard, DirWriteGuard};
 pub use file::{FileEntry, FileLoad, FileLock, FileReadGuard, FileWriteGuard};
 
 type LFU = freqache::LFUCache<PathBuf>;
-
-struct Evict;
 
 struct Inner<FE> {
     files: HashMap<PathBuf, FileLock<FE>>,
@@ -25,7 +23,6 @@ struct Cache<FE> {
     capacity: usize,
     lfu: LFU,
     inner: Mutex<Inner<FE>>,
-    tx: mpsc::UnboundedSender<Evict>,
 }
 
 impl<FE> Cache<FE> {
@@ -36,12 +33,6 @@ impl<FE> Cache<FE> {
 
         if state.files.insert(path.clone(), file).is_none() {
             state.size += file_size;
-        }
-
-        if state.size > self.capacity {
-            if let Err(cause) = self.tx.send(Evict) {
-                panic!("filesystem cache cleanup thread is dead: {}", cause);
-            }
         }
     }
 
@@ -66,7 +57,7 @@ impl<FE> Cache<FE> {
 }
 
 impl<FE> Cache<FE> {
-    fn new(capacity: usize, tx: mpsc::UnboundedSender<Evict>) -> Self {
+    fn new(capacity: usize) -> Self {
         let inner = Mutex::new(Inner {
             size: 0,
             files: HashMap::new(),
@@ -76,7 +67,6 @@ impl<FE> Cache<FE> {
             lfu: LFU::new(),
             inner,
             capacity,
-            tx,
         }
     }
 }
@@ -84,25 +74,37 @@ impl<FE> Cache<FE> {
 pub async fn load<FE: FileLoad + Send + Sync + 'static>(
     root: PathBuf,
     cache_size: usize,
+    cleanup_interval: Duration,
 ) -> Result<DirLock<FE>, io::Error> {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let cache = Arc::new(Cache::new(cache_size, tx));
-    spawn_cleanup_thread(cache.clone(), rx);
-    DirLock::load(cache, root).await
+    let cache = Arc::new(Cache::new(cache_size));
+    spawn_cleanup_thread(cache.clone(), cleanup_interval);
+    let dir = DirLock::load(cache, root).await?;
+    Ok(dir)
 }
 
 fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
     cache: Arc<Cache<FE>>,
-    mut rx: mpsc::UnboundedReceiver<Evict>,
+    interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
+    let mut interval = tokio::time::interval(interval);
+
     tokio::spawn(async move {
-        while Arc::strong_count(&cache) > 1 && rx.recv().await.is_some() {
+        loop {
+            loop {
+                if cache.inner.lock().expect("file cache state").size > cache.capacity {
+                    break;
+                } else {
+                    interval.tick().await;
+                }
+            }
+
             let mut evictions = {
                 let evictions = FuturesUnordered::new();
                 let occupied = cache.inner.lock().expect("file cache state").size;
                 let mut over = occupied as i64 - cache.capacity as i64;
 
-                for path in cache.lfu.iter() {
+                let mut lfu = cache.lfu.iter();
+                while let Some(path) = lfu.next() {
                     if over <= 0 {
                         break;
                     }
@@ -125,14 +127,14 @@ fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
                 evictions
             };
 
-            if !evictions.is_empty() {
-                while let Some(result) = evictions.next().await {
-                    match result {
-                        Ok(()) => {},
-                        Err(cause) => panic!("failed to evict file from cache: {}", cause),
-                    }
+            while let Some(result) = evictions.next().await {
+                match result {
+                    Ok(()) => {}
+                    Err(cause) => panic!("failed to evict file from cache: {}", cause),
                 }
             }
+
+            interval.tick().await;
         }
     })
 }

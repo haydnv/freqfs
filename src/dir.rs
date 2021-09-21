@@ -99,7 +99,7 @@ impl<FE> Dir<FE> {
         }
     }
 
-    pub fn get_dir<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<&DirLock<FE>>
+    pub fn get_dir<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<DirLock<FE>>
     where
         String: Borrow<Q>,
     {
@@ -107,13 +107,13 @@ impl<FE> Dir<FE> {
             None
         } else {
             match self.contents.get(name) {
-                Some(DirEntry::Dir(dir_lock)) => Some(dir_lock),
+                Some(DirEntry::Dir(dir_lock)) => Some(dir_lock.clone()),
                 _ => None,
             }
         }
     }
 
-    pub fn get_file<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<&FileLock<FE>>
+    pub fn get_file<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<FileLock<FE>>
     where
         String: Borrow<Q>,
     {
@@ -121,7 +121,7 @@ impl<FE> Dir<FE> {
             None
         } else {
             match self.contents.get(name) {
-                Some(DirEntry::File(file_lock)) => Some(file_lock),
+                Some(DirEntry::File(file_lock)) => Some(file_lock.clone()),
                 _ => None,
             }
         }

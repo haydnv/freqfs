@@ -48,6 +48,20 @@ impl<FE> FileState<FE> {
             _ => false,
         }
     }
+
+    fn size(&self) -> Option<usize> {
+        match self {
+            Self::Pending => None,
+            Self::Read(size, _) | Self::Modified(size, _) => Some(*size),
+        }
+    }
+
+    fn maybe_lock_contents(&self) -> Option<OwnedRwLockWriteGuard<FE>> {
+        match self {
+            Self::Pending => None,
+            Self::Read(_, lock) | Self::Modified(_, lock) => lock.clone().try_write_owned().ok(),
+        }
+    }
 }
 
 struct Inner<FE> {
@@ -96,10 +110,6 @@ impl<FE> FileLock<FE> {
         Self {
             inner: Arc::new(inner),
         }
-    }
-
-    pub(crate) fn ref_count(&self) -> usize {
-        Arc::strong_count(&self.inner)
     }
 
     pub(crate) fn size(&self) -> Option<usize> {
@@ -189,11 +199,19 @@ impl<FE> FileLock<FE> {
             })
     }
 
-    pub async fn sync(&self) -> Result<(), io::Error>
+    pub async fn sync(&self, err_if_locked: bool) -> Result<(), io::Error>
     where
         FE: FileLoad,
     {
-        let mut state = self.inner.contents.write().await;
+        let mut state = if err_if_locked {
+            self.inner
+                .contents
+                .try_write()
+                .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))?
+        } else {
+            self.inner.contents.write().await
+        };
+
         let new_state = match &*state {
             FileState::Pending => return Ok(()), // no-op
             FileState::Read(old_size, lock) | FileState::Modified(old_size, lock) => {
@@ -212,23 +230,14 @@ impl<FE> FileLock<FE> {
     where
         FE: FileLoad + 'static,
     {
-        // there's one ref in the Cache, one in the parent Dir, and one in this struct
-        if self.ref_count() > 3 {
-            return None;
-        }
-
         let mut state = self.inner.contents.clone().try_write_owned().ok()?;
 
-        Some(async move {
-            match &*state {
-                FileState::Pending => return Ok(()), // no-op
-                FileState::Read(old_size, lock) | FileState::Modified(old_size, lock) => {
-                    let contents = lock.write().await;
-                    persist(self.inner.path.as_path(), &*contents).await?;
-                    self.inner.cache.remove(&self.inner.path, *old_size);
-                }
-            };
+        let old_size = state.size()?;
+        let contents = state.maybe_lock_contents()?;
 
+        Some(async move {
+            persist(self.inner.path.as_path(), &*contents).await?;
+            self.inner.cache.remove(&self.inner.path, old_size);
             *state = FileState::Pending;
             Ok(())
         })
