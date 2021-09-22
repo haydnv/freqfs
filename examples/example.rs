@@ -224,12 +224,14 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
 async fn main() -> Result<(), io::Error> {
     let path = setup_tmp_dir().await?;
 
-    // load the cache into memory
-    // this only loads directory and file paths into memory, not file contents
+    // initialize the cache
+    let cache = Cache::new(40, Duration::from_millis(10));
+
+    // load the directory and file paths into memory (not file contents, yet)
+    let root = cache.load(path.clone()).await?;
+
     // all I/O under the cache directory at `path` MUST now go through the cache methods
     // otherwise concurrent filesystem access may cause errors
-    let root = load(path.clone(), 40, Duration::from_millis(10)).await?;
-
     run_example(root).await?;
 
     let mut txt_file_path = path.clone();

@@ -41,7 +41,16 @@ struct Inner<FE> {
     size: usize,
 }
 
-struct Cache<FE> {
+impl<FE> Inner<FE> {
+    fn new() -> Self {
+        Self {
+            size: 0,
+            files: HashMap::new(),
+        }
+    }
+}
+
+pub struct Cache<FE> {
     capacity: usize,
     lfu: LFU,
     inner: Mutex<Inner<FE>>,
@@ -78,34 +87,46 @@ impl<FE> Cache<FE> {
     }
 }
 
-impl<FE> Cache<FE> {
-    fn new(capacity: usize) -> Self {
-        let inner = Mutex::new(Inner {
-            size: 0,
-            files: HashMap::new(),
+impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
+    /// Initialize the cache.
+    ///
+    /// `cleanup_interval` specifies how often cache cleanup should run in the background.
+    ///
+    /// This function should only be called once.
+    pub fn new(capacity: usize, cleanup_interval: Duration) -> Arc<Self> {
+        let cache = Arc::new(Self {
+            lfu: LFU::new(),
+            inner: Mutex::new(Inner::new()),
+            capacity,
         });
 
-        Self {
-            lfu: LFU::new(),
-            inner,
-            capacity,
-        }
-    }
-}
+        spawn_cleanup_thread(cache.clone(), cleanup_interval);
 
-/// Load the filesystem cache from the given `root` directory.
-///
-/// `duration` specified how frequently the background cleanup thread should check if the
-/// cache is full.
-pub async fn load<FE: FileLoad + Send + Sync + 'static>(
-    root: PathBuf,
-    cache_size: usize,
-    cleanup_interval: Duration,
-) -> Result<DirLock<FE>, io::Error> {
-    let cache = Arc::new(Cache::new(cache_size));
-    spawn_cleanup_thread(cache.clone(), cleanup_interval);
-    let dir = DirLock::load(cache, root).await?;
-    Ok(dir)
+        cache
+    }
+
+    /// Load a filesystem directory into the cache.
+    ///
+    /// After loading, all interactions with files under this directory should go through
+    /// a [`DirLock`] or [`FileLock`].
+    pub async fn load(self: Arc<Self>, path: PathBuf) -> Result<DirLock<FE>, io::Error> {
+        {
+            let lock = self.inner.lock().expect("file cache state");
+            for file_path in lock.files.keys() {
+                if file_path.starts_with(&path) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "called Cache::load on a directory that's already loaded: {:?}",
+                            path
+                        ),
+                    ));
+                }
+            }
+        }
+
+        DirLock::load(self, path).await
+    }
 }
 
 fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
