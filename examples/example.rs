@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rand::Rng;
+use safecast::AsType;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -57,19 +58,22 @@ impl FileLoad for File {
     }
 }
 
-impl FileEntry<Vec<u8>> for File {
-    fn expected() -> &'static str {
-        "a binary file"
-    }
-
-    fn as_file(&self) -> Option<&Vec<u8>> {
+impl AsType<Vec<u8>> for File {
+    fn as_type(&self) -> Option<&Vec<u8>> {
         match self {
             Self::Bin(bytes) => Some(bytes),
             _ => None,
         }
     }
 
-    fn as_file_mut(&mut self) -> Option<&mut Vec<u8>> {
+    fn as_type_mut(&mut self) -> Option<&mut Vec<u8>> {
+        match self {
+            Self::Bin(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
+    fn into_type(self) -> Option<Vec<u8>> {
         match self {
             Self::Bin(bytes) => Some(bytes),
             _ => None,
@@ -77,19 +81,22 @@ impl FileEntry<Vec<u8>> for File {
     }
 }
 
-impl FileEntry<String> for File {
-    fn expected() -> &'static str {
-        "a text file"
-    }
-
-    fn as_file(&self) -> Option<&String> {
+impl AsType<String> for File {
+    fn as_type(&self) -> Option<&String> {
         match self {
             Self::Text(text) => Some(text),
             _ => None,
         }
     }
 
-    fn as_file_mut(&mut self) -> Option<&mut String> {
+    fn as_type_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    fn into_type(self) -> Option<String> {
         match self {
             Self::Text(text) => Some(text),
             _ => None,

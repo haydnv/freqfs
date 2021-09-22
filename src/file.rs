@@ -1,4 +1,5 @@
 use std::convert::TryInto;
+use std::fmt;
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -6,6 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::Future;
+use safecast::AsType;
 use tokio::fs;
 use tokio::sync::{
     OwnedRwLockMappedWriteGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock,
@@ -14,15 +16,6 @@ use tokio::sync::{
 use crate::Cache;
 
 const TMP: &'static str = "_freqfs";
-
-/// Conversion methods from a container type (such as an `enum`) and file data.
-pub trait FileEntry<F> {
-    fn expected() -> &'static str;
-
-    fn as_file(&self) -> Option<&F>;
-
-    fn as_file_mut(&mut self) -> Option<&mut F>;
-}
 
 /// Load & save methods for a file data container type.
 #[async_trait]
@@ -167,16 +160,16 @@ impl<FE> FileLock<FE> {
     /// Lock this file for reading.
     pub async fn read<F>(&self) -> Result<FileReadGuard<FE, F>, io::Error>
     where
-        FE: FileLoad + FileEntry<F>,
+        FE: FileLoad + AsType<F>,
     {
         let contents = self.get_lock().await?;
         let guard = contents.read_owned().await;
-        OwnedRwLockReadGuard::try_map(guard, |entry| entry.as_file())
+        OwnedRwLockReadGuard::try_map(guard, |entry| entry.as_type())
             .map(|guard| FileReadGuard { guard })
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("invalid file type, expected {}", FE::expected()),
+                    format!("invalid file type, expected {}", std::any::type_name::<F>()),
                 )
             })
     }
@@ -184,16 +177,16 @@ impl<FE> FileLock<FE> {
     /// Lock this file for writing.
     pub async fn write<F>(&self) -> Result<FileWriteGuard<FE, F>, io::Error>
     where
-        FE: FileLoad + FileEntry<F>,
+        FE: FileLoad + AsType<F>,
     {
         let contents = self.get_lock().await?;
         let guard = contents.write_owned().await;
-        OwnedRwLockWriteGuard::try_map(guard, |entry| entry.as_file_mut())
+        OwnedRwLockWriteGuard::try_map(guard, |entry| entry.as_type_mut())
             .map(|guard| FileWriteGuard { guard })
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("invalid file type, expected {}", FE::expected()),
+                    format!("invalid file type, expected {}", std::any::type_name::<F>()),
                 )
             })
     }
@@ -245,6 +238,12 @@ impl<FE> FileLock<FE> {
             *state = FileState::Pending;
             Ok(())
         })
+    }
+}
+
+impl<FE> fmt::Debug for FileLock<FE> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "cached file at {:?}", self.inner.path)
     }
 }
 

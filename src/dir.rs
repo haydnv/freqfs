@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::hash::Hash;
 use std::io;
 use std::ops::{Deref, DerefMut};
@@ -157,6 +158,12 @@ impl<FE> Dir<FE> {
             .keys()
             .filter(|name| !self.deleted.contains(*name))
             .count()
+    }
+}
+
+impl<FE> fmt::Debug for Dir<FE> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "cached directory at {:?}", self.path)
     }
 }
 

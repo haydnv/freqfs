@@ -32,7 +32,7 @@ mod dir;
 mod file;
 
 pub use dir::{DirEntry, DirLock, DirReadGuard, DirWriteGuard};
-pub use file::{FileEntry, FileLoad, FileLock, FileReadGuard, FileWriteGuard};
+pub use file::{FileLoad, FileLock, FileReadGuard, FileWriteGuard};
 
 type LFU = freqache::LFUCache<PathBuf>;
 
