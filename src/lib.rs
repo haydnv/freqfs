@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures::future::TryFutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 
 mod dir;
@@ -147,28 +148,37 @@ fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
 
             let mut evictions = {
                 let evictions = FuturesUnordered::new();
-                let occupied = cache.inner.lock().expect("file cache state").size;
-                let mut over = occupied as i64 - cache.capacity as i64;
+                let state = cache.inner.lock().expect("file cache state");
+                let mut over = state.size as i64 - cache.capacity as i64;
 
-                let mut lfu = cache.lfu.iter();
-                while let Some(path) = lfu.next() {
-                    if over <= 0 {
-                        break;
-                    }
-
-                    let state = cache.inner.lock().expect("file cache state");
-                    if let Some(file) = state.files.get(&path).cloned() {
-                        if let Some(size) = file.size() {
-                            if let Some(eviction) = file.evict() {
-                                evictions.push(eviction);
-                                over -= size as i64;
-                            }
+                let removed = {
+                    let mut removed = Vec::with_capacity(cache.lfu.len());
+                    let mut lfu = cache.lfu.iter();
+                    while let Some(path) = lfu.next() {
+                        if over <= 0 {
+                            break;
                         }
-                    } else {
-                        // since we're not holding the lock on `state`,
-                        // the file may already have been removed
-                        // between calling lfu.iter() and now
+
+                        if let Some(file) = state.files.get(&path).cloned() {
+                            if let Some(size) = file.size() {
+                                if let Some(eviction) = file.evict() {
+                                    evictions.push(eviction.map_ok(|()| path));
+                                    over -= size as i64;
+                                }
+                            }
+                        } else {
+                            // since we're not holding the lock on `state`,
+                            // the file may already have been removed
+                            // between calling lfu.iter() and now
+                            removed.push(path);
+                        }
                     }
+
+                    removed
+                };
+
+                for path in removed.into_iter() {
+                    cache.lfu.remove(&path);
                 }
 
                 evictions
@@ -176,7 +186,7 @@ fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
 
             while let Some(result) = evictions.next().await {
                 match result {
-                    Ok(()) => {}
+                    Ok(_path) => {}
                     Err(cause) => panic!("failed to evict file from cache: {}", cause),
                 }
             }
