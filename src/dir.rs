@@ -4,12 +4,13 @@ use std::fmt;
 use std::hash::Hash;
 use std::io;
 use std::ops::{Deref, DerefMut};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::future::Future;
 use futures::stream::{FuturesUnordered, TryStreamExt};
+use safecast::AsType;
 use tokio::fs;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
@@ -49,6 +50,11 @@ pub struct Dir<FE> {
 }
 
 impl<FE> Dir<FE> {
+    /// Borrow the `Path` of this `Dir`.
+    pub fn path(&self) -> &Path {
+        self.path.as_path()
+    }
+
     /// Create and return a new subdirectory of this `Dir`.
     pub fn create_dir(&mut self, name: String) -> Result<DirLock<FE>, io::Error> {
         if !self.deleted.remove(&name) {
@@ -90,9 +96,74 @@ impl<FE> Dir<FE> {
         Ok(lock)
     }
 
+    /// Copy the given file into this directory, overwriting any file that may already exist
+    /// with the given name.
+    pub async fn copy_from<F>(
+        &mut self,
+        name: String,
+        source: FileLock<FE>,
+    ) -> Result<FileLock<FE>, io::Error>
+    where
+        FE: Clone + AsType<F>,
+    {
+        self.deleted.remove(&name);
+
+        if let Some(entry) = self.contents.get(&name) {
+            match entry {
+                DirEntry::File(dest) => {
+                    dest.copy_from(source).await?;
+                    Ok(dest.clone())
+                }
+                DirEntry::Dir(_) => Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("there is already a directory at {}", name),
+                )),
+            }
+        } else {
+            let mut path = self.path.clone();
+            path.push(&name);
+
+            let lock = FileLock::copy_to(self.cache.clone(), path, source).await?;
+            self.contents.insert(name, DirEntry::File(lock.clone()));
+            Ok(lock)
+        }
+    }
+
+    /// Return a new subdirectory of this `Dir`, creating it if it doesn't already exist.
+    pub fn get_or_create_dir(&mut self, name: String) -> Result<DirLock<FE>, io::Error> {
+        // if the requested dir hasn't been deleted
+        if !self.deleted.remove(&name) {
+            // and it already exists
+            if let Some(entry) = self.contents.get(&name) {
+                // return the existing dir
+                return match entry {
+                    DirEntry::Dir(dir_lock) => Ok(dir_lock.clone()),
+                    DirEntry::File(file) => Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("there is already a file at {}: {:?}", name, file),
+                    )),
+                };
+            }
+        }
+
+        let mut path = self.path.clone();
+        path.push(&name);
+
+        let lock = DirLock::new(self.cache.clone(), path);
+        self.contents.insert(name, DirEntry::Dir(lock.clone()));
+        Ok(lock)
+    }
+
     /// Delete the entry with the given `name` from this `Dir`.
     ///
     /// Returns `true` if the given `name` was present.
+    ///
+    /// References to sub-directories and files remain valid even after deleting their parent
+    /// directory, so writing to a file, after deleting its parent directory will re-create the
+    /// directory on the filesystem.
+    ///
+    /// Make sure to call `sync` to delete any contents on the filesystem if it's possible for
+    /// an new entry with the same name to be created later.
     pub fn delete(&mut self, name: String) -> bool {
         let exists = self.contents.contains_key(&name);
         self.deleted.insert(name);
