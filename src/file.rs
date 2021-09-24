@@ -98,17 +98,9 @@ impl<FE> FileLock<FE> {
         self.inner.path.as_path()
     }
 
-    pub(crate) fn size(&self) -> Option<usize> {
-        let state = self.inner.contents.try_read().ok()?;
-        match &*state {
-            FileState::Pending => None,
-            FileState::Read(size, _) => Some(*size),
-            FileState::Modified(size, _) => Some(*size),
-        }
-    }
-
     pub async fn size_hint(&self) -> Option<usize> {
         let state = self.inner.contents.read().await;
+
         match &*state {
             FileState::Pending => None,
             FileState::Read(size, _) => Some(*size),
@@ -152,7 +144,6 @@ impl<FE> FileLock<FE> {
             *file_state = new_state;
         }
 
-        let file_state = file_state.downgrade();
         match &*file_state {
             FileState::Pending => unreachable!(),
             FileState::Read(size, contents) | FileState::Modified(size, contents) => {
@@ -172,7 +163,6 @@ impl<FE> FileLock<FE> {
     {
         let contents = self.get_lock(false).await?;
         let guard = contents.read_owned().await;
-
         OwnedRwLockReadGuard::try_map(guard, |entry| entry.as_type())
             .map(|guard| FileReadGuard { guard })
             .map_err(|_| {
@@ -190,6 +180,7 @@ impl<FE> FileLock<FE> {
     {
         let contents = self.get_lock(true).await?;
         let guard = contents.write_owned().await;
+
         OwnedRwLockWriteGuard::try_map(guard, |entry| entry.as_type_mut())
             .map(|guard| FileWriteGuard { guard })
             .map_err(|_| {
@@ -232,7 +223,7 @@ impl<FE> FileLock<FE> {
         Ok(())
     }
 
-    pub(crate) fn evict(self) -> Option<impl Future<Output = Result<(), io::Error>>>
+    pub(crate) fn evict(self) -> Option<(usize, impl Future<Output = Result<(), io::Error>>)>
     where
         FE: FileLoad + 'static,
     {
@@ -250,17 +241,24 @@ impl<FE> FileLock<FE> {
             }
         };
 
-        Some(async move {
+        let eviction = async move {
             if modified {
                 persist(self.inner.path.as_path(), &*contents).await?;
             }
 
-            let mut cache = self.inner.cache.inner.lock().expect("file cache state");
-            cache.size -= old_size;
+            self.inner.cache.lfu.remove(&self.inner.path);
+            self.inner
+                .cache
+                .inner
+                .lock()
+                .expect("file cache state")
+                .size -= old_size;
 
             *state = FileState::Pending;
             Ok(())
-        })
+        };
+
+        Some((old_size, eviction))
     }
 }
 

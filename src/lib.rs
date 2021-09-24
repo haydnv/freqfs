@@ -26,7 +26,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures::future::TryFutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 
 mod dir;
@@ -51,6 +50,7 @@ impl<FE> Inner<FE> {
     }
 }
 
+/// An in-memory cache layer over [`tokio::fs`] with least-frequently-used (LFU) eviction.
 pub struct Cache<FE> {
     capacity: usize,
     lfu: LFU,
@@ -125,15 +125,13 @@ fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
     cache: Arc<Cache<FE>>,
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
-    let mut interval = tokio::time::interval(interval);
-
     tokio::spawn(async move {
         loop {
             loop {
                 if cache.inner.lock().expect("file cache state").size > cache.capacity {
                     break;
                 } else {
-                    interval.tick().await;
+                    tokio::time::sleep(interval).await;
                 }
             }
 
@@ -149,11 +147,9 @@ fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
                     }
 
                     if let Some(file) = state.files.get(&path).cloned() {
-                        if let Some(size) = file.size() {
-                            if let Some(eviction) = file.evict() {
-                                evictions.push(eviction.map_ok(|()| path));
-                                over -= size as i64;
-                            }
+                        if let Some((size, eviction)) = file.evict() {
+                            over -= size as i64;
+                            evictions.push(eviction);
                         }
                     }
                 }
@@ -163,12 +159,12 @@ fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
 
             while let Some(result) = evictions.next().await {
                 match result {
-                    Ok(_path) => {}
+                    Ok(()) => {},
                     Err(cause) => panic!("failed to evict file from cache: {}", cause),
                 }
             }
 
-            interval.tick().await;
+            tokio::time::sleep(interval).await
         }
     })
 }
