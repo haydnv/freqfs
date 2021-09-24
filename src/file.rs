@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::{join, Future};
+use futures::Future;
 use safecast::AsType;
 use tokio::fs;
 use tokio::sync::{
@@ -41,20 +41,6 @@ impl<FE> FileState<FE> {
         match self {
             Self::Pending => true,
             _ => false,
-        }
-    }
-
-    fn size(&self) -> Option<usize> {
-        match self {
-            Self::Pending => None,
-            Self::Read(size, _) | Self::Modified(size, _) => Some(*size),
-        }
-    }
-
-    fn maybe_lock_contents(&self) -> Option<OwnedRwLockWriteGuard<FE>> {
-        match self {
-            Self::Pending => None,
-            Self::Read(_, lock) | Self::Modified(_, lock) => lock.clone().try_write_owned().ok(),
         }
     }
 }
@@ -108,95 +94,6 @@ impl<FE> FileLock<FE> {
         }
     }
 
-    pub(crate) async fn copy_to(
-        cache: Arc<Cache<FE>>,
-        path: PathBuf,
-        source: FileLock<FE>,
-    ) -> Result<Self, io::Error>
-    where
-        FE: Clone,
-    {
-        let source_state = source.inner.contents.read().await;
-        let state = match &*source_state {
-            FileState::Pending => {
-                fs::copy(source.path(), &path).await?;
-                FileState::Pending
-            }
-            FileState::Read(size, lock) | FileState::Modified(size, lock) => {
-                let value = lock.read().await;
-                let copy = Arc::new(RwLock::new(value.clone()));
-                FileState::Modified(*size, copy)
-            }
-        };
-
-        let size = match &state {
-            FileState::Pending => None,
-            FileState::Read(size, _) | FileState::Modified(size, _) => Some(*size),
-        };
-
-        let file = FileLock {
-            inner: Arc::new(Inner {
-                cache: cache.clone(),
-                path: path.clone(),
-                contents: Arc::new(RwLock::new(state)),
-            }),
-        };
-
-        if let Some(size) = size {
-            cache.insert(path, file.clone(), size);
-        }
-
-        Ok(file)
-    }
-
-    pub(crate) async fn copy_from(&self, source: FileLock<FE>) -> Result<(), io::Error>
-    where
-        FE: Clone,
-    {
-        let (source_state, mut dest_state) =
-            join!(self.inner.contents.read(), source.inner.contents.write());
-
-        let new_state = match &*source_state {
-            FileState::Pending => {
-                fs::copy(source.path(), self.path()).await?;
-                FileState::Pending
-            }
-            FileState::Read(size, lock) | FileState::Modified(size, lock) => {
-                let value = lock.read().await;
-                let copy = Arc::new(RwLock::new(value.clone()));
-                FileState::Modified(*size, copy)
-            }
-        };
-
-        // update the cache
-        match &*dest_state {
-            FileState::Pending => match &*source_state {
-                FileState::Pending => {} // if they're both pending, there's nothing to update
-                FileState::Read(new_size, _) | FileState::Modified(new_size, _) => {
-                    // if a pending file is replaced with one in memory, insert it into the cache
-                    self.inner
-                        .cache
-                        .insert(self.inner.path.clone(), self.clone(), *new_size);
-                }
-            },
-            FileState::Read(old_size, _) | FileState::Modified(old_size, _) => match &*source_state
-            {
-                FileState::Pending => {
-                    // if a file in memory is replaced by one that's not, remove it from the cache
-                    self.inner.cache.remove(&self.inner.path, *old_size);
-                }
-                FileState::Read(new_size, _) | FileState::Modified(new_size, _) => {
-                    // if an old file in memory is replaced by a new one, update the cache
-                    // with the size difference
-                    self.inner.cache.resize(*old_size, *new_size);
-                }
-            },
-        }
-
-        *dest_state = new_state;
-        Ok(())
-    }
-
     pub fn path(&self) -> &Path {
         self.inner.path.as_path()
     }
@@ -219,7 +116,7 @@ impl<FE> FileLock<FE> {
         }
     }
 
-    async fn get_lock(&self) -> Result<Arc<RwLock<FE>>, io::Error>
+    async fn get_lock(&self, mutate: bool) -> Result<Arc<RwLock<FE>>, io::Error>
     where
         FE: FileLoad,
     {
@@ -245,12 +142,21 @@ impl<FE> FileLock<FE> {
             *file_state = FileState::Read(size, Arc::new(RwLock::new(entry)));
         }
 
+        if mutate {
+            let new_state = match &*file_state {
+                FileState::Pending => unreachable!(),
+                FileState::Read(size, lock) => FileState::Modified(*size, lock.clone()),
+                FileState::Modified(size, lock) => FileState::Modified(*size, lock.clone()),
+            };
+
+            *file_state = new_state;
+        }
+
         let file_state = file_state.downgrade();
         match &*file_state {
             FileState::Pending => unreachable!(),
             FileState::Read(size, contents) | FileState::Modified(size, contents) => {
                 self.inner
-                    .clone()
                     .cache
                     .insert(self.inner.path.clone(), self.clone(), *size);
 
@@ -264,8 +170,9 @@ impl<FE> FileLock<FE> {
     where
         FE: FileLoad + AsType<F>,
     {
-        let contents = self.get_lock().await?;
+        let contents = self.get_lock(false).await?;
         let guard = contents.read_owned().await;
+
         OwnedRwLockReadGuard::try_map(guard, |entry| entry.as_type())
             .map(|guard| FileReadGuard { guard })
             .map_err(|_| {
@@ -281,7 +188,7 @@ impl<FE> FileLock<FE> {
     where
         FE: FileLoad + AsType<F>,
     {
-        let contents = self.get_lock().await?;
+        let contents = self.get_lock(true).await?;
         let guard = contents.write_owned().await;
         OwnedRwLockWriteGuard::try_map(guard, |entry| entry.as_type_mut())
             .map(|guard| FileWriteGuard { guard })
@@ -331,12 +238,26 @@ impl<FE> FileLock<FE> {
     {
         let mut state = self.inner.contents.clone().try_write_owned().ok()?;
 
-        let old_size = state.size()?;
-        let contents = state.maybe_lock_contents()?;
+        let (old_size, contents, modified) = match &*state {
+            FileState::Pending => return None,
+            FileState::Read(size, contents) => {
+                let contents = contents.clone().try_write_owned().ok()?;
+                (*size, contents, false)
+            }
+            FileState::Modified(size, contents) => {
+                let contents = contents.clone().try_write_owned().ok()?;
+                (*size, contents, true)
+            }
+        };
 
         Some(async move {
-            persist(self.inner.path.as_path(), &*contents).await?;
-            self.inner.cache.remove(&self.inner.path, old_size);
+            if modified {
+                persist(self.inner.path.as_path(), &*contents).await?;
+            }
+
+            let mut cache = self.inner.cache.inner.lock().expect("file cache state");
+            cache.size -= old_size;
+
             *state = FileState::Pending;
             Ok(())
         })

@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use futures::future::Future;
 use futures::stream::{FuturesUnordered, TryStreamExt};
-use safecast::AsType;
 use tokio::fs;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
@@ -94,39 +93,6 @@ impl<FE> Dir<FE> {
         self.contents.insert(name, DirEntry::File(lock.clone()));
         self.cache.insert(path, lock.clone(), size);
         Ok(lock)
-    }
-
-    /// Copy the given file into this directory, overwriting any file that may already exist
-    /// with the given name.
-    pub async fn copy_from<F>(
-        &mut self,
-        name: String,
-        source: FileLock<FE>,
-    ) -> Result<FileLock<FE>, io::Error>
-    where
-        FE: Clone + AsType<F>,
-    {
-        self.deleted.remove(&name);
-
-        if let Some(entry) = self.contents.get(&name) {
-            match entry {
-                DirEntry::File(dest) => {
-                    dest.copy_from(source).await?;
-                    Ok(dest.clone())
-                }
-                DirEntry::Dir(_) => Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("there is already a directory at {}", name),
-                )),
-            }
-        } else {
-            let mut path = self.path.clone();
-            path.push(&name);
-
-            let lock = FileLock::copy_to(self.cache.clone(), path, source).await?;
-            self.contents.insert(name, DirEntry::File(lock.clone()));
-            Ok(lock)
-        }
     }
 
     /// Return a new subdirectory of this `Dir`, creating it if it doesn't already exist.

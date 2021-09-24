@@ -68,15 +68,6 @@ impl<FE> Cache<FE> {
         }
     }
 
-    fn remove(&self, path: &PathBuf, entry_size: usize) {
-        let mut state = self.inner.lock().expect("file cache state");
-
-        if state.files.remove(path).is_some() {
-            self.lfu.remove(path);
-            state.size -= entry_size;
-        }
-    }
-
     fn resize(&self, old_size: usize, new_size: usize) {
         let mut state = self.inner.lock().expect("file cache state");
 
@@ -147,38 +138,24 @@ fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
             }
 
             let mut evictions = {
-                let evictions = FuturesUnordered::new();
                 let state = cache.inner.lock().expect("file cache state");
                 let mut over = state.size as i64 - cache.capacity as i64;
+                let evictions = FuturesUnordered::new();
 
-                let removed = {
-                    let mut removed = Vec::with_capacity(cache.lfu.len());
-                    let mut lfu = cache.lfu.iter();
-                    while let Some(path) = lfu.next() {
-                        if over <= 0 {
-                            break;
-                        }
-
-                        if let Some(file) = state.files.get(&path).cloned() {
-                            if let Some(size) = file.size() {
-                                if let Some(eviction) = file.evict() {
-                                    evictions.push(eviction.map_ok(|()| path));
-                                    over -= size as i64;
-                                }
-                            }
-                        } else {
-                            // since we're not holding the lock on `state`,
-                            // the file may already have been removed
-                            // between calling lfu.iter() and now
-                            removed.push(path);
-                        }
+                let mut lfu = cache.lfu.iter();
+                while let Some(path) = lfu.next() {
+                    if over <= 0 {
+                        break;
                     }
 
-                    removed
-                };
-
-                for path in removed.into_iter() {
-                    cache.lfu.remove(&path);
+                    if let Some(file) = state.files.get(&path).cloned() {
+                        if let Some(size) = file.size() {
+                            if let Some(eviction) = file.evict() {
+                                evictions.push(eviction.map_ok(|()| path));
+                                over -= size as i64;
+                            }
+                        }
+                    }
                 }
 
                 evictions
