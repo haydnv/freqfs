@@ -248,7 +248,11 @@ impl<FE> FileLock<FE> {
 
             let mut cache_state = self.inner.cache.inner.lock().expect("file cache state");
             if self.inner.cache.lfu.remove(&self.inner.path) {
-                cache_state.size -= old_size;
+                if old_size > cache_state.size {
+                    cache_state.size -= old_size;
+                } else {
+                    cache_state.size = 0;
+                }
             }
 
             *state = FileState::Pending;
