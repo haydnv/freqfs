@@ -159,7 +159,7 @@ fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
 
             while let Some(result) = evictions.next().await {
                 match result {
-                    Ok(()) => {},
+                    Ok(()) => {}
                     Err(cause) => panic!("failed to evict file from cache: {}", cause),
                 }
             }

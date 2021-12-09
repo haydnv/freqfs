@@ -332,8 +332,12 @@ async fn persist<FE: FileLoad>(path: &Path, file: &FE) -> Result<u64, io::Error>
 
 async fn create_parent(path: &Path) -> Result<(), io::Error> {
     if let Some(parent) = path.parent() {
-        if !parent.exists() {
-            return tokio::fs::create_dir_all(parent).await;
+        while !parent.exists() {
+            match tokio::fs::create_dir_all(parent).await {
+                Ok(()) => return Ok(()),
+                Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(cause) => return Err(cause),
+            }
         }
     }
 

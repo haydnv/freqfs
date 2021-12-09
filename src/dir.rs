@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use futures::future::Future;
 use futures::stream::{FuturesUnordered, TryStreamExt};
+use log::warn;
 use tokio::fs;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
@@ -58,6 +59,10 @@ impl<FE> Dir<FE> {
     pub fn create_dir(&mut self, name: String) -> Result<DirLock<FE>, io::Error> {
         if !self.deleted.remove(&name) {
             if self.contents.contains_key(&name) {
+                warn!(
+                    "attempted to create a directory {} in {:?} that already exists",
+                    name, self.path
+                );
                 return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
             }
         }
@@ -81,6 +86,10 @@ impl<FE> Dir<FE> {
     {
         if !self.deleted.remove(&name) {
             if self.contents.contains_key(&name) {
+                warn!(
+                    "attempted to create a file {} in {:?} that already exists",
+                    name, self.path
+                );
                 return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
             }
         }
@@ -333,9 +342,17 @@ impl<FE> DirLock<FE> {
                     let mut path = path.clone();
                     path.push(name);
 
-                    if !path.exists() {
-                        return Some(fs::create_dir_all(path));
-                    }
+                    return Some(async move {
+                        while !path.exists() {
+                            match fs::create_dir_all(&path).await {
+                                Ok(()) => return Ok(()),
+                                Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => {}
+                                Err(cause) => return Err(cause),
+                            }
+                        }
+
+                        Ok(())
+                    });
                 }
 
                 None
