@@ -34,6 +34,8 @@ mod file;
 pub use dir::{DirEntry, DirLock, DirReadGuard, DirWriteGuard};
 pub use file::{FileLoad, FileLock, FileReadGuard, FileWriteGuard};
 
+const MAX_FILE_HANDLES: usize = 512;
+
 type LFU = freqache::LFUCache<PathBuf>;
 
 struct Inner<FE> {
@@ -83,16 +85,23 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
     /// Initialize the cache.
     ///
     /// `cleanup_interval` specifies how often cache cleanup should run in the background.
+    /// `max_file_handles` specifies how many files are allowed to be evicted at once.
+    /// If not specified, `max_file_handles` will default to 512.
     ///
     /// This function should only be called once.
-    pub fn new(capacity: usize, cleanup_interval: Duration) -> Arc<Self> {
+    ///
+    /// Panics: if `max_file_handles` is `Some(0)`
+    pub fn new(capacity: usize, cleanup_interval: Duration, max_file_handles: Option<usize>) -> Arc<Self> {
         let cache = Arc::new(Self {
             lfu: LFU::new(),
             inner: Mutex::new(Inner::new()),
             capacity,
         });
 
-        spawn_cleanup_thread(cache.clone(), cleanup_interval);
+        let max_file_handles = max_file_handles.unwrap_or(MAX_FILE_HANDLES);
+        assert!(max_file_handles > 0);
+
+        spawn_cleanup_thread(cache.clone(), cleanup_interval, max_file_handles);
 
         cache
     }
@@ -124,6 +133,7 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
 fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
     cache: Arc<Cache<FE>>,
     interval: Duration,
+    max_file_handles: usize,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -142,7 +152,7 @@ fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
 
                 let mut lfu = cache.lfu.iter();
                 while let Some(path) = lfu.next() {
-                    if over <= 0 {
+                    if over <= 0 || evictions.len() >= max_file_handles {
                         break;
                     }
 
