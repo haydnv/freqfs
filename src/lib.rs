@@ -31,7 +31,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 mod dir;
 mod file;
 
-pub use dir::{DirEntry, DirLock, DirReadGuard, DirWriteGuard};
+pub use dir::{Dir, DirEntry, DirLock, DirReadGuard, DirWriteGuard};
 pub use file::{FileLoad, FileLock, FileReadGuard, FileWriteGuard};
 
 const MAX_FILE_HANDLES: usize = 512;
@@ -91,7 +91,11 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
     /// This function should only be called once.
     ///
     /// Panics: if `max_file_handles` is `Some(0)`
-    pub fn new(capacity: usize, cleanup_interval: Duration, max_file_handles: Option<usize>) -> Arc<Self> {
+    pub fn new(
+        capacity: usize,
+        cleanup_interval: Duration,
+        max_file_handles: Option<usize>,
+    ) -> Arc<Self> {
         let cache = Arc::new(Self {
             lfu: LFU::new(),
             inner: Mutex::new(Inner::new()),
