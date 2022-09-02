@@ -289,10 +289,28 @@ impl<FE> DirLock<FE> {
         DirReadGuard { guard }
     }
 
+    /// Lock this directory for reading synchronously, if possible.
+    pub fn try_read(&self) -> Result<DirReadGuard<FE>, io::Error> {
+        self.inner
+            .clone()
+            .try_read_owned()
+            .map(|guard| DirReadGuard { guard })
+            .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
+    }
+
     /// Lock this directory for writing.
     pub async fn write(&self) -> DirWriteGuard<FE> {
         let guard = self.inner.clone().write_owned().await;
         DirWriteGuard { guard }
+    }
+
+    /// Lock this directory for writing synchronously, if possible.
+    pub fn try_write(&self) -> Result<DirWriteGuard<FE>, io::Error> {
+        self.inner
+            .clone()
+            .try_write_owned()
+            .map(|guard| DirWriteGuard { guard })
+            .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
     }
 
     /// Synchronize this directory with the filesystem.
