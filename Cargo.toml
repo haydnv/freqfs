@@ -5,7 +5,7 @@ authors = ["haydn@tinychain.net"]
 edition = "2018"
 license = "Apache-2.0"
 description = "An in-memory filesystem cache layer over tokio::fs, with LFU eviction"
-repository = "https://github.com/haydnv/freqache"
+repository = "https://github.com/haydnv/freqfs"
 readme = "README.md"
 
 categories = ["caching", "filesystem", "memory-management"]
