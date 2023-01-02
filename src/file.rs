@@ -156,6 +156,48 @@ impl<FE> FileLock<FE> {
         }
     }
 
+    fn try_get_lock(&self, mutate: bool) -> Result<Arc<RwLock<FE>>, io::Error>
+    where
+        FE: FileLoad,
+    {
+        let mut file_state = self
+            .inner
+            .contents
+            .try_write()
+            .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))?;
+
+        if mutate {
+            let new_state = match &*file_state {
+                FileState::Pending => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "file is not in cache",
+                    ))
+                }
+                FileState::Read(size, lock) => FileState::Modified(*size, lock.clone()),
+                FileState::Modified(size, lock) => FileState::Modified(*size, lock.clone()),
+            };
+
+            *file_state = new_state;
+        }
+
+        match &*file_state {
+            FileState::Pending => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "file is not in cache",
+                ))
+            }
+            FileState::Read(size, contents) | FileState::Modified(size, contents) => {
+                self.inner
+                    .cache
+                    .insert(self.inner.path.clone(), self.clone(), *size);
+
+                Ok(contents.clone())
+            }
+        }
+    }
+
     /// Lock this file for reading.
     pub async fn read<F>(&self) -> Result<FileReadGuard<FE, F>, io::Error>
     where
@@ -163,14 +205,21 @@ impl<FE> FileLock<FE> {
     {
         let contents = self.get_lock(false).await?;
         let guard = contents.read_owned().await;
-        OwnedRwLockReadGuard::try_map(guard, |entry| entry.as_type())
-            .map(|guard| FileReadGuard { guard })
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid file type, expected {}", std::any::type_name::<F>()),
-                )
+        read_type(guard)
+    }
+
+    /// Lock this file for reading synchronously if possible, otherwise return an error.
+    pub fn try_read<F>(&self) -> Result<FileReadGuard<FE, F>, io::Error>
+    where
+        FE: FileLoad + AsType<F>,
+    {
+        self.try_get_lock(false)
+            .and_then(|contents| {
+                contents
+                    .try_read_owned()
+                    .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
             })
+            .and_then(read_type)
     }
 
     /// Lock this file for writing.
@@ -180,15 +229,21 @@ impl<FE> FileLock<FE> {
     {
         let contents = self.get_lock(true).await?;
         let guard = contents.write_owned().await;
+        write_type(guard)
+    }
 
-        OwnedRwLockWriteGuard::try_map(guard, |entry| entry.as_type_mut())
-            .map(|guard| FileWriteGuard { guard })
-            .map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("invalid file type, expected {}", std::any::type_name::<F>()),
-                )
+    /// Lock this file for writing synchronously if possible, otherwise return an error.
+    pub fn try_write<F>(&self) -> Result<FileWriteGuard<FE, F>, io::Error>
+    where
+        FE: FileLoad + AsType<F>,
+    {
+        self.try_get_lock(true)
+            .and_then(|contents| {
+                contents
+                    .try_write_owned()
+                    .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
             })
+            .and_then(write_type)
     }
 
     /// Back up this file's contents to the filesystem.
@@ -342,4 +397,34 @@ async fn create_parent(path: &Path) -> Result<(), io::Error> {
     }
 
     Ok(())
+}
+
+#[inline]
+fn read_type<F, T>(guard: OwnedRwLockReadGuard<F>) -> Result<FileReadGuard<F, T>, io::Error>
+where
+    F: AsType<T>,
+{
+    OwnedRwLockReadGuard::try_map(guard, |entry| entry.as_type())
+        .map(|guard| FileReadGuard { guard })
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid file type, expected {}", std::any::type_name::<F>()),
+            )
+        })
+}
+
+#[inline]
+fn write_type<F, T>(guard: OwnedRwLockWriteGuard<F>) -> Result<FileWriteGuard<F, T>, io::Error>
+where
+    F: AsType<T>,
+{
+    OwnedRwLockWriteGuard::try_map(guard, |entry| entry.as_type_mut())
+        .map(|guard| FileWriteGuard { guard })
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid file type, expected {}", std::any::type_name::<F>()),
+            )
+        })
 }
