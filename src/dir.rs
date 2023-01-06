@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use futures::future::Future;
-use futures::stream::{FuturesUnordered, TryStreamExt};
+use futures::future::{Future, FutureExt};
+use futures::stream::{FuturesUnordered, StreamExt, TryStreamExt};
 use log::warn;
 use tokio::fs;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
@@ -42,6 +42,7 @@ impl<FE> DirEntry<FE> {
     }
 }
 
+/// A filesystem directory
 pub struct Dir<FE> {
     path: PathBuf,
     cache: Arc<Cache<FE>>,
@@ -50,12 +51,21 @@ pub struct Dir<FE> {
 }
 
 impl<FE> Dir<FE> {
-    /// Borrow the `Path` of this `Dir`.
+    /// Borrow the [`Path`] of this [`Dir`].
     pub fn path(&self) -> &Path {
         self.path.as_path()
     }
 
-    /// Create and return a new subdirectory of this `Dir`.
+    /// Return `true` if this [`Dir`] has an entry with the given `name`.
+    pub fn contains<N: Borrow<str>>(&self, name: N) -> bool {
+        if self.deleted.contains(name.borrow()) {
+            false
+        } else {
+            self.contents.contains_key(name.borrow())
+        }
+    }
+
+    /// Create and return a new subdirectory of this [`Dir`].
     pub fn create_dir(&mut self, name: String) -> Result<DirLock<FE>, io::Error> {
         if !self.deleted.remove(&name) {
             if self.contents.contains_key(&name) {
@@ -63,6 +73,7 @@ impl<FE> Dir<FE> {
                     "attempted to create a directory {} in {:?} that already exists",
                     name, self.path
                 );
+
                 return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
             }
         }
@@ -74,7 +85,7 @@ impl<FE> Dir<FE> {
         Ok(lock)
     }
 
-    /// Create a new file in this `Dir` with the given `contents`.
+    /// Create a new file in this [`Dir`] with the given `contents`.
     pub fn create_file<F>(
         &mut self,
         name: String,
@@ -104,7 +115,7 @@ impl<FE> Dir<FE> {
         Ok(lock)
     }
 
-    /// Return a new subdirectory of this `Dir`, creating it if it doesn't already exist.
+    /// Return a new subdirectory of this [`Dir`], creating it if it doesn't already exist.
     pub fn get_or_create_dir(&mut self, name: String) -> Result<DirLock<FE>, io::Error> {
         // if the requested dir hasn't been deleted
         if !self.deleted.remove(&name) {
@@ -129,7 +140,7 @@ impl<FE> Dir<FE> {
         Ok(lock)
     }
 
-    /// Delete the entry with the given `name` from this `Dir`.
+    /// Delete the entry with the given `name` from this [`Dir`].
     ///
     /// Returns `true` if the given `name` was present.
     ///
@@ -145,7 +156,7 @@ impl<FE> Dir<FE> {
         exists
     }
 
-    /// Get the entry with the given `name` from this `Dir`.
+    /// Get the entry with the given `name` from this [`Dir`].
     pub fn get<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<&DirEntry<FE>>
     where
         String: Borrow<Q>,
@@ -157,7 +168,7 @@ impl<FE> Dir<FE> {
         }
     }
 
-    /// Get the subdirectory with the given `name` from this `Dir`, if present.
+    /// Get the subdirectory with the given `name` from this [`Dir`], if present.
     ///
     /// Also returns `None` if the entry at `name` is a file.
     pub fn get_dir<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<&DirLock<FE>>
@@ -174,7 +185,7 @@ impl<FE> Dir<FE> {
         }
     }
 
-    /// Get the file with the given `name` from this `Dir`, if present.
+    /// Get the file with the given `name` from this [`Dir`], if present.
     ///
     /// Also returns `None` if the entry at `name` is a directory.
     pub fn get_file<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<FileLock<FE>>
@@ -191,14 +202,27 @@ impl<FE> Dir<FE> {
         }
     }
 
-    /// Return an [`Iterator`] over the entries in this `Dir`.
+    /// Return `true` if this [`Dir`] contains no entries.
+    pub fn is_empty(&self) -> bool {
+        if self.contents.is_empty() {
+            true
+        } else {
+            self.contents
+                .keys()
+                .filter(|name| !self.deleted.contains(*name))
+                .next()
+                .is_none()
+        }
+    }
+
+    /// Return an [`Iterator`] over the entries in this [`Dir`].
     pub fn iter(&self) -> impl Iterator<Item = (&String, &DirEntry<FE>)> {
         self.contents
             .iter()
             .filter(move |(name, _)| !self.deleted.contains(*name))
     }
 
-    /// Return the number of entries in this `Dir`.
+    /// Return the number of entries in this [`Dir`].
     pub fn len(&self) -> usize {
         self.contents
             .keys()
@@ -382,6 +406,32 @@ impl<FE> DirLock<FE> {
         }
 
         Ok(())
+    }
+
+    /// Recursively delete empty entries in this [`Dir`].
+    /// Returns the number of entries in this [`Dir`].
+    /// Call this function immediately after loading the cache to avoid the risk of deadlock.
+    pub fn trim(&self) -> Pin<Box<dyn Future<Output = usize> + '_>> {
+        Box::pin(async move {
+            let mut entries = self.write().await;
+
+            let sizes = FuturesUnordered::new();
+            for (name, entry) in entries.iter() {
+                match entry {
+                    DirEntry::Dir(dir) => sizes.push(dir.trim().map(|size| (name.clone(), size))),
+                    DirEntry::File(_) => {}
+                }
+            }
+
+            let sizes = sizes.collect::<Vec<_>>().await;
+            for (name, size) in sizes {
+                if size == 0 {
+                    entries.delete(name);
+                }
+            }
+
+            entries.len()
+        })
     }
 }
 
