@@ -16,8 +16,8 @@
 //! to [`load`]) is routed through the cache (not e.g. via [`tokio::fs`] or [`std::fs`] elsewhere).
 //! It may raise a [`std::io::Error`] or panic if this assumption is not valid.
 //!
-//! In the case that your program may not have permission to write to a directory or file
-//! in the cache, be sure to check the permissions before modifying any directory or file.
+//! In the case that your program may not have permission to write to a filesystem entry,
+//! be sure to check the permissions before modifying it.
 //! The background cleanup thread will panic if it attempts an impermissible write operation.
 
 use std::collections::HashMap;

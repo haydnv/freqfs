@@ -302,7 +302,7 @@ impl<FE> FileLock<FE> {
             }
 
             let mut cache_state = self.inner.cache.inner.lock().expect("file cache state");
-            if self.inner.cache.lfu.remove(&self.inner.path) {
+            if self.inner.cache.lfu.remove(&self.inner.path).is_some() {
                 if old_size < cache_state.size {
                     cache_state.size -= old_size;
                 } else {
