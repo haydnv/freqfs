@@ -164,11 +164,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
 
         // trigger an explicit sync of the new contents, without removing them from memory
         // this will update the cache with the new file size
-        //
-        // IMPORTANT: sync acquires a write lock on the file contents
-        // so it's easy to create a deadlock by calling `sync` explicitly
-        // pass `true` to error out if there's already a lock on the file contents
-        text_file.sync(true).await?;
+        text_file.sync().await?;
     }
 
     let mut sub_dir = root.get_dir("subdir").expect("subdirectory").write().await;
@@ -180,11 +176,8 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
 
     // create a new file "vector.bin"
     // this is a synchronous operation since it happens in-memory only
-    let binary_file = sub_sub_dir.create_file(
-        "vector.bin".to_string(),
-        (0..25).collect::<Vec<u8>>(),
-        Some(25),
-    )?;
+    let binary_file =
+        sub_sub_dir.create_file("vector.bin".to_string(), (0..25).collect::<Vec<u8>>(), 25)?;
 
     // then lock it so its data won't be evicted
     let binary_file: FileReadGuard<File, Vec<u8>> = binary_file.read().await?;

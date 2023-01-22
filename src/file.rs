@@ -32,16 +32,27 @@ pub trait FileLoad: Sized {
 enum FileState<FE> {
     Pending,
     Read(usize, Arc<RwLock<FE>>),
-    #[allow(unused)]
     Modified(usize, Arc<RwLock<FE>>),
 }
 
 impl<FE> FileState<FE> {
+    #[inline]
     fn is_pending(&self) -> bool {
         match self {
             Self::Pending => true,
             _ => false,
         }
+    }
+
+    #[inline]
+    fn upgrade(&mut self) {
+        let (size, lock) = match self {
+            Self::Pending => panic!("cannot write a pending cache entry"),
+            Self::Read(size, lock) => (*size, lock.clone()),
+            Self::Modified(_size, _lock) => return,
+        };
+
+        *self = Self::Modified(size, lock);
     }
 }
 
@@ -114,7 +125,7 @@ impl<FE> FileLock<FE> {
     {
         let mut file_state = self.inner.contents.write().await;
 
-        if file_state.is_pending() {
+        let newly_loaded = if file_state.is_pending() {
             let file = fs::File::open(&self.inner.path).await?;
             let metadata = file.metadata().await?;
             let size = match metadata.len().try_into() {
@@ -131,25 +142,27 @@ impl<FE> FileLock<FE> {
             };
 
             let entry = FE::load(self.inner.path.as_path(), file, metadata).await?;
-            *file_state = FileState::Read(size, Arc::new(RwLock::new(entry)));
-        }
 
-        if mutate {
-            let new_state = match &*file_state {
-                FileState::Pending => unreachable!(),
-                FileState::Read(size, lock) => FileState::Modified(*size, lock.clone()),
-                FileState::Modified(size, lock) => FileState::Modified(*size, lock.clone()),
-            };
+            if mutate {
+                *file_state = FileState::Modified(size, Arc::new(RwLock::new(entry)));
+            } else {
+                *file_state = FileState::Read(size, Arc::new(RwLock::new(entry)));
+            }
 
-            *file_state = new_state;
-        }
+            true
+        } else if mutate {
+            file_state.upgrade();
+            false
+        } else {
+            false
+        };
 
         match &*file_state {
-            FileState::Pending => unreachable!(),
+            FileState::Pending => unreachable!("read a pending file"),
             FileState::Read(size, contents) | FileState::Modified(size, contents) => {
                 self.inner
                     .cache
-                    .insert(self.inner.path.clone(), self.clone(), *size);
+                    .bump(&self.inner.path.clone(), *size, newly_loaded);
 
                 Ok(contents.clone())
             }
@@ -166,19 +179,8 @@ impl<FE> FileLock<FE> {
             .try_write()
             .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))?;
 
-        if mutate {
-            let new_state = match &*file_state {
-                FileState::Pending => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "file is not in cache",
-                    ))
-                }
-                FileState::Read(size, lock) => FileState::Modified(*size, lock.clone()),
-                FileState::Modified(size, lock) => FileState::Modified(*size, lock.clone()),
-            };
-
-            *file_state = new_state;
+        if mutate && !file_state.is_pending() {
+            file_state.upgrade();
         }
 
         match &*file_state {
@@ -189,10 +191,7 @@ impl<FE> FileLock<FE> {
                 ))
             }
             FileState::Read(size, contents) | FileState::Modified(size, contents) => {
-                self.inner
-                    .cache
-                    .insert(self.inner.path.clone(), self.clone(), *size);
-
+                self.inner.cache.bump(&self.inner.path, *size, false);
                 Ok(contents.clone())
             }
         }
@@ -247,12 +246,7 @@ impl<FE> FileLock<FE> {
     }
 
     /// Back up this file's contents to the filesystem.
-    ///
-    /// This method acquires a write lock on the file contents, so it can deadlock
-    /// if there is already a lock on the file contents.
-    ///
-    /// Pass `true` to error out if there is already a lock on the file contents.
-    pub async fn sync(&self, err_if_locked: bool) -> Result<(), io::Error>
+    pub async fn sync(&self) -> Result<(), io::Error>
     where
         FE: FileLoad,
     {
@@ -260,13 +254,7 @@ impl<FE> FileLock<FE> {
 
         let new_state = match &*state {
             FileState::Modified(old_size, lock) => {
-                let contents = if err_if_locked {
-                    lock.try_write()
-                        .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))?
-                } else {
-                    lock.write().await
-                };
-
+                let contents = lock.write().await;
                 let new_size = persist(self.inner.path.as_path(), &*contents).await?;
                 self.inner.cache.resize(*old_size, new_size as usize);
                 FileState::Read(new_size as usize, lock.clone())

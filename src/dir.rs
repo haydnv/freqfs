@@ -90,7 +90,7 @@ impl<FE> Dir<FE> {
         &mut self,
         name: String,
         contents: F,
-        size_hint: Option<usize>,
+        size: usize,
     ) -> Result<FileLock<FE>, io::Error>
     where
         FE: From<F>,
@@ -108,7 +108,6 @@ impl<FE> Dir<FE> {
         let mut path = self.path.clone();
         path.push(&name);
 
-        let size = size_hint.unwrap_or_default();
         let lock = FileLock::new(self.cache.clone(), path.clone(), contents, size);
         self.contents.insert(name, DirEntry::File(lock.clone()));
         self.cache.insert(path, lock.clone(), size);

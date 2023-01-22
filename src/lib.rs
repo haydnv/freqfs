@@ -60,24 +60,26 @@ pub struct Cache<FE> {
 }
 
 impl<FE> Cache<FE> {
-    fn insert(&self, path: PathBuf, file: FileLock<FE>, file_size: usize) {
-        let mut state = self.inner.lock().expect("file cache state");
-
-        self.lfu.insert(path.clone());
-
-        if state.files.insert(path.clone(), file).is_none() {
+    fn bump(&self, path: &PathBuf, file_size: usize, newly_loaded: bool) -> bool {
+        if newly_loaded && file_size > 0 {
+            let mut state = self.inner.lock().expect("file cache state");
             state.size += file_size;
         }
+
+        self.lfu.bump::<PathBuf>(path)
+    }
+
+    fn insert(&self, path: PathBuf, file: FileLock<FE>, file_size: usize) {
+        let mut state = self.inner.lock().expect("file cache state");
+        self.lfu.insert(path.clone());
+        state.files.insert(path, file);
+        state.size += file_size;
     }
 
     fn resize(&self, old_size: usize, new_size: usize) {
         let mut state = self.inner.lock().expect("file cache state");
-
-        if new_size > old_size {
-            state.size += new_size - old_size;
-        } else if new_size < old_size {
-            state.size -= old_size - new_size;
-        }
+        state.size += new_size;
+        state.size -= old_size;
     }
 }
 
@@ -154,13 +156,12 @@ fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
                 let mut over = state.size as i64 - cache.capacity as i64;
                 let evictions = FuturesUnordered::new();
 
-                let mut lfu = cache.lfu.iter();
-                while let Some(path) = lfu.next() {
+                for path in cache.lfu.iter() {
                     if over <= 0 || evictions.len() >= max_file_handles {
                         break;
                     }
 
-                    if let Some(file) = state.files.get(&path).cloned() {
+                    if let Some(file) = state.files.get(&*path).cloned() {
                         if let Some((size, eviction)) = file.evict() {
                             over -= size as i64;
                             evictions.push(eviction);
