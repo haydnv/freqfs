@@ -160,10 +160,7 @@ impl<FE> FileLock<FE> {
         match &*file_state {
             FileState::Pending => unreachable!("read a pending file"),
             FileState::Read(size, contents) | FileState::Modified(size, contents) => {
-                self.inner
-                    .cache
-                    .bump(&self.inner.path.clone(), *size, newly_loaded);
-
+                self.inner.cache.bump(&self.inner.path, *size, newly_loaded);
                 Ok(contents.clone())
             }
         }
@@ -270,10 +267,14 @@ impl<FE> FileLock<FE> {
     where
         FE: FileLoad + 'static,
     {
+        // if this file is in use, don't evict it
         let mut state = self.inner.contents.clone().try_write_owned().ok()?;
 
         let (old_size, contents, modified) = match &*state {
-            FileState::Pending => return None,
+            FileState::Pending => {
+                // in this case there's nothing to evict
+                return None;
+            }
             FileState::Read(size, contents) => {
                 let contents = contents.clone().try_write_owned().ok()?;
                 (*size, contents, false)
@@ -289,14 +290,7 @@ impl<FE> FileLock<FE> {
                 persist(self.inner.path.as_path(), &*contents).await?;
             }
 
-            let mut cache_state = self.inner.cache.inner.lock().expect("file cache state");
-            if self.inner.cache.lfu.remove(&self.inner.path).is_some() {
-                if old_size < cache_state.size {
-                    cache_state.size -= old_size;
-                } else {
-                    cache_state.size = 0;
-                }
-            }
+            self.inner.cache.resize(old_size, 0);
 
             *state = FileState::Pending;
             Ok(())

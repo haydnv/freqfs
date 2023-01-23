@@ -20,12 +20,12 @@
 //! be sure to check the permissions before modifying it.
 //! The background cleanup thread will panic if it attempts an impermissible write operation.
 
-use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use futures::future::Future;
 use futures::stream::{FuturesUnordered, StreamExt};
 
 mod dir;
@@ -36,18 +36,18 @@ pub use file::{FileLoad, FileLock, FileReadGuard, FileWriteGuard};
 
 const MAX_FILE_HANDLES: usize = 512;
 
-type LFU = freqache::LFUCache<PathBuf>;
+type LFU<FE> = freqache::LFUCache<PathBuf, FileLock<FE>>;
 
-struct Inner<FE> {
-    files: HashMap<PathBuf, FileLock<FE>>,
+struct State<FE> {
+    files: LFU<FE>,
     size: usize,
 }
 
-impl<FE> Inner<FE> {
+impl<FE> State<FE> {
     fn new() -> Self {
         Self {
             size: 0,
-            files: HashMap::new(),
+            files: LFU::new(),
         }
     }
 }
@@ -55,29 +55,33 @@ impl<FE> Inner<FE> {
 /// An in-memory cache layer over [`tokio::fs`] with least-frequently-used (LFU) eviction.
 pub struct Cache<FE> {
     capacity: usize,
-    lfu: LFU,
-    inner: Mutex<Inner<FE>>,
+    max_file_handles: usize,
+    state: Mutex<State<FE>>,
 }
 
 impl<FE> Cache<FE> {
     fn bump(&self, path: &PathBuf, file_size: usize, newly_loaded: bool) -> bool {
-        if newly_loaded && file_size > 0 {
-            let mut state = self.inner.lock().expect("file cache state");
+        let mut state = self.lock();
+
+        if newly_loaded {
             state.size += file_size;
         }
 
-        self.lfu.bump::<PathBuf>(path)
+        state.files.bump(path)
     }
 
     fn insert(&self, path: PathBuf, file: FileLock<FE>, file_size: usize) {
-        let mut state = self.inner.lock().expect("file cache state");
-        self.lfu.insert(path.clone());
+        let mut state = self.lock();
         state.files.insert(path, file);
         state.size += file_size;
     }
 
+    fn lock(&self) -> MutexGuard<State<FE>> {
+        self.state.lock().expect("file cache state")
+    }
+
     fn resize(&self, old_size: usize, new_size: usize) {
-        let mut state = self.inner.lock().expect("file cache state");
+        let mut state = self.lock();
         state.size += new_size;
         state.size -= old_size;
     }
@@ -98,16 +102,15 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
         cleanup_interval: Duration,
         max_file_handles: Option<usize>,
     ) -> Arc<Self> {
+        let max_file_handles = max_file_handles.unwrap_or(MAX_FILE_HANDLES);
+
         let cache = Arc::new(Self {
-            lfu: LFU::new(),
-            inner: Mutex::new(Inner::new()),
             capacity,
+            max_file_handles,
+            state: Mutex::new(State::new()),
         });
 
-        let max_file_handles = max_file_handles.unwrap_or(MAX_FILE_HANDLES);
-        assert!(max_file_handles > 0);
-
-        spawn_cleanup_thread(cache.clone(), cleanup_interval, max_file_handles);
+        spawn_cleanup_thread(cache.clone(), cleanup_interval);
 
         cache
     }
@@ -118,8 +121,8 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
     /// a [`DirLock`] or [`FileLock`].
     pub async fn load(self: Arc<Self>, path: PathBuf) -> Result<DirLock<FE>, io::Error> {
         {
-            let lock = self.inner.lock().expect("file cache state");
-            for file_path in lock.files.keys() {
+            let state = self.lock();
+            for (file_path, _) in state.files.iter() {
                 if file_path.starts_with(&path) {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
@@ -134,52 +137,49 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
 
         DirLock::load(self, path).await
     }
+
+    fn gc(&self) -> FuturesUnordered<impl Future<Output = Result<(), io::Error>>> {
+        let evictions = FuturesUnordered::new();
+        let state = self.lock();
+        if state.size < self.capacity {
+            return evictions;
+        }
+
+        let mut over = state.size as i64 - self.capacity as i64;
+
+        for (_path, file) in state.files.iter() {
+            if let Some((size, eviction)) = file.clone().evict() {
+                over -= size as i64;
+                evictions.push(eviction);
+            }
+
+            if over <= 0 || evictions.len() >= self.max_file_handles {
+                break;
+            }
+        }
+
+        evictions
+    }
 }
 
 fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
     cache: Arc<Cache<FE>>,
     interval: Duration,
-    max_file_handles: usize,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            loop {
-                if cache.inner.lock().expect("file cache state").size > cache.capacity {
-                    break;
-                } else {
-                    tokio::time::sleep(interval).await;
-                }
-            }
+            let mut evictions = cache.gc();
 
-            let mut evictions = {
-                let state = cache.inner.lock().expect("file cache state");
-                let mut over = state.size as i64 - cache.capacity as i64;
-                let evictions = FuturesUnordered::new();
-
-                for path in cache.lfu.iter() {
-                    if over <= 0 || evictions.len() >= max_file_handles {
-                        break;
-                    }
-
-                    if let Some(file) = state.files.get(&*path).cloned() {
-                        if let Some((size, eviction)) = file.evict() {
-                            over -= size as i64;
-                            evictions.push(eviction);
-                        }
+            if evictions.is_empty() {
+                tokio::time::sleep(interval).await
+            } else {
+                while let Some(result) = evictions.next().await {
+                    match result {
+                        Ok(()) => {}
+                        Err(cause) => panic!("failed to evict file from cache: {}", cause),
                     }
                 }
-
-                evictions
-            };
-
-            while let Some(result) = evictions.next().await {
-                match result {
-                    Ok(()) => {}
-                    Err(cause) => panic!("failed to evict file from cache: {}", cause),
-                }
             }
-
-            tokio::time::sleep(interval).await
         }
     })
 }
