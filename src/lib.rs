@@ -126,11 +126,11 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
     ///
     /// After loading, all interactions with files under this directory should go through
     /// a [`DirLock`] or [`FileLock`].
-    pub async fn load(self: Arc<Self>, path: PathBuf) -> Result<DirLock<FE>, io::Error> {
+    pub fn load(self: Arc<Self>, path: PathBuf) -> Result<DirLock<FE>, io::Error> {
         {
             let state = self.lock();
             for (file_path, _) in state.files.iter() {
-                if file_path.starts_with(&path) {
+                if file_path.starts_with(&path) || path.starts_with(file_path) {
                     return Err(io::Error::new(
                         io::ErrorKind::AlreadyExists,
                         format!(
@@ -142,7 +142,7 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
             }
         }
 
-        DirLock::load(self, path).await
+        DirLock::load(self, path)
     }
 
     fn gc(&self) -> FuturesUnordered<impl Future<Output = Result<(), io::Error>>> {

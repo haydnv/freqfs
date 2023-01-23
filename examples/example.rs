@@ -225,7 +225,7 @@ async fn main() -> Result<(), io::Error> {
     let cache = Cache::new(40, Duration::from_millis(10), None);
 
     // load the directory and file paths into memory (not file contents, yet)
-    let root = cache.load(path.clone()).await?;
+    let root = cache.load(path.clone())?;
 
     // all I/O under the cache directory at `path` MUST now go through the cache methods
     // otherwise concurrent filesystem access may cause errors
