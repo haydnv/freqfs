@@ -167,40 +167,44 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
         text_file.sync().await?;
     }
 
-    let mut sub_dir = root.get_dir("subdir").expect("subdirectory").write().await;
+    {
+        let mut sub_dir = root.get_dir("subdir").expect("subdirectory").write().await;
 
-    // create a new directory
-    // this is a synchronous operation since it happens in-memory only
-    let sub_sub_dir = sub_dir.create_dir("sub-subdir".to_string())?;
-    let mut sub_sub_dir = sub_sub_dir.write().await;
+        // create a new directory
+        // this is a synchronous operation since it happens in-memory only
+        let sub_sub_dir = sub_dir.create_dir("sub-subdir".to_string())?;
+        let mut sub_sub_dir = sub_sub_dir.write().await;
 
-    // create a new file "vector.bin"
-    // this is a synchronous operation since it happens in-memory only
-    let binary_file =
-        sub_sub_dir.create_file("vector.bin".to_string(), (0..25).collect::<Vec<u8>>(), 25)?;
+        // create a new file "vector.bin"
+        // this is a synchronous operation since it happens in-memory only
+        let binary_file =
+            sub_sub_dir.create_file("vector.bin".to_string(), (0..25).collect::<Vec<u8>>(), 25)?;
 
-    // then lock it so its data won't be evicted
-    let binary_file: FileReadGuard<File, Vec<u8>> = binary_file.read().await?;
+        // then lock it so its data won't be evicted
+        let binary_file: FileReadGuard<File, Vec<u8>> = binary_file.read().await?;
 
-    // now the cache is full, so the contents of "hello.txt" will be automatically sync'd
-    // and removed from main memory
-    tokio::time::sleep(Duration::from_millis(15)).await;
+        // now the cache is full, so the contents of "hello.txt" will be automatically sync'd
+        // and removed from main memory
+        tokio::time::sleep(Duration::from_millis(15)).await;
 
-    // dropping "vector.bin" will allow its contents to be removed from the in-memory cache
-    std::mem::drop(binary_file);
+        // dropping "vector.bin" will allow its contents to be removed from the in-memory cache
+        std::mem::drop(binary_file);
 
-    // then loading "hello.txt" again will fill the cache
-    let text_file = root.get_file("hello.txt").expect("text file");
-    let contents: FileReadGuard<File, String> = text_file.read().await?;
-    assert_eq!(&*contents, "नमस्ते दुनिया!");
+        // then loading "hello.txt" again will fill the cache
+        let text_file = root.get_file("hello.txt").expect("text file");
+        let contents: FileReadGuard<File, String> = text_file.read().await?;
+        assert_eq!(&*contents, "नमस्ते दुनिया!");
 
-    // so the contents of "vector.bin" will be automatically sync'd and removed from main memory
-    tokio::time::sleep(Duration::from_millis(15)).await;
+        // so the contents of "vector.bin" will be automatically sync'd and removed from main memory
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+
+    // now it's safe to delete the entries whose locks have been dropped
 
     // deleting is a synchronous operation operation since it happens in-memory only
-    assert!(root.delete("hello.txt".to_string()));
+    assert!(root.delete("hello.txt".to_string()).expect("delete"));
     assert!(root.get("hello.txt").is_none());
-    assert!(root.delete("subdir".to_string()));
+    assert!(root.delete("subdir".to_string()).expect("delete"));
     assert!(root.get("subdir").is_none());
 
     // but we can explicitly sync to delete the file on the filesystem

@@ -33,13 +33,14 @@ enum FileState<FE> {
     Pending,
     Read(usize, Arc<RwLock<FE>>),
     Modified(usize, Arc<RwLock<FE>>),
+    Deleted(usize, bool),
 }
 
 impl<FE> FileState<FE> {
     #[inline]
     fn is_pending(&self) -> bool {
         match self {
-            Self::Pending => true,
+            Self::Pending | Self::Deleted(_, _) => true,
             _ => false,
         }
     }
@@ -47,7 +48,7 @@ impl<FE> FileState<FE> {
     #[inline]
     fn upgrade(&mut self) {
         let (size, lock) = match self {
-            Self::Pending => panic!("cannot write a pending cache entry"),
+            Self::Pending | Self::Deleted(_, _) => panic!("cannot write a pending cache entry"),
             Self::Read(size, lock) => (*size, lock.clone()),
             Self::Modified(_size, _lock) => return,
         };
@@ -109,16 +110,6 @@ impl<FE> FileLock<FE> {
         self.inner.path.as_path()
     }
 
-    pub async fn size_hint(&self) -> Option<usize> {
-        let state = self.inner.contents.read().await;
-
-        match &*state {
-            FileState::Pending => None,
-            FileState::Read(size, _) => Some(*size),
-            FileState::Modified(size, _) => Some(*size),
-        }
-    }
-
     async fn get_lock(&self, mutate: bool) -> Result<Arc<RwLock<FE>>, io::Error>
     where
         FE: FileLoad,
@@ -158,7 +149,7 @@ impl<FE> FileLock<FE> {
         };
 
         match &*file_state {
-            FileState::Pending => unreachable!("read a pending file"),
+            FileState::Pending | FileState::Deleted(_, _) => unreachable!("read a pending file"),
             FileState::Read(size, contents) | FileState::Modified(size, contents) => {
                 self.inner.cache.bump(&self.inner.path, *size, newly_loaded);
                 Ok(contents.clone())
@@ -181,7 +172,7 @@ impl<FE> FileLock<FE> {
         }
 
         match &*file_state {
-            FileState::Pending => {
+            FileState::Pending | FileState::Deleted(_, _) => {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "file is not in cache",
@@ -256,10 +247,41 @@ impl<FE> FileLock<FE> {
                 self.inner.cache.resize(*old_size, new_size as usize);
                 FileState::Read(new_size as usize, lock.clone())
             }
-            _ => return Ok(()), // no-op
+            FileState::Deleted(size, file_only) => {
+                if *file_only {
+                    fs::remove_file(self.path()).await?;
+                }
+
+                self.inner.cache.remove(&self.inner.path, *size);
+                return Ok(());
+            }
+            _ => {
+                // no-op
+                return Ok(());
+            }
         };
 
         *state = new_state;
+        Ok(())
+    }
+
+    pub(crate) fn delete(&self, file_only: bool) -> Result<(), io::Error> {
+        let mut file_state = self.inner.contents.try_write().map_err(|cause| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("cannot delete a file that's still in use: {}", cause),
+            )
+        })?;
+
+        let size = match &*file_state {
+            FileState::Pending => 0,
+            FileState::Read(size, _) => *size,
+            FileState::Modified(size, _) => *size,
+            FileState::Deleted(size, _) => *size,
+        };
+
+        *file_state = FileState::Deleted(size, file_only);
+
         Ok(())
     }
 
@@ -283,6 +305,7 @@ impl<FE> FileLock<FE> {
                 let contents = contents.clone().try_write_owned().ok()?;
                 (*size, contents, true)
             }
+            FileState::Deleted(_, _) => unreachable!("evict a deleted file"),
         };
 
         let eviction = async move {
@@ -353,7 +376,12 @@ async fn persist<FE: FileLoad>(path: &Path, file: &FE) -> Result<u64, io::Error>
                 .open(tmp.as_path())
                 .await?
         } else {
-            create_parent(tmp.as_path()).await?;
+            if let Some(parent) = tmp.parent() {
+                if !parent.exists() {
+                    create_dir(parent).await?;
+                }
+            }
+
             fs::File::create(tmp.as_path()).await?
         };
 
@@ -367,17 +395,15 @@ async fn persist<FE: FileLoad>(path: &Path, file: &FE) -> Result<u64, io::Error>
     Ok(size)
 }
 
-async fn create_parent(path: &Path) -> Result<(), io::Error> {
-    if let Some(parent) = path.parent() {
-        while !parent.exists() {
-            match tokio::fs::create_dir_all(parent).await {
-                Ok(()) => return Ok(()),
-                Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => {
-                    // this just means there's another file in the same directory
-                    // being sync'd at the same time
-                }
-                Err(cause) => return Err(cause),
+async fn create_dir(path: &Path) -> Result<(), io::Error> {
+    while !path.exists() {
+        match tokio::fs::create_dir_all(path).await {
+            Ok(()) => return Ok(()),
+            Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => {
+                // this just means there's another file in the same directory
+                // being sync'd at the same time
             }
+            Err(cause) => return Err(cause),
         }
     }
 

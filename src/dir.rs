@@ -8,8 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, mem};
 
-use futures::future::{Future, FutureExt};
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::future::Future;
 use log::warn;
 use tokio::fs;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
@@ -101,6 +100,7 @@ impl<FE> Dir<FE> {
                     "attempted to create a file {} in {:?} that already exists",
                     name, self.path
                 );
+
                 return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
             }
         }
@@ -141,18 +141,27 @@ impl<FE> Dir<FE> {
 
     /// Delete the entry with the given `name` from this [`Dir`].
     ///
-    /// Returns `true` if the given `name` was present.
+    /// Returns `true` if there was an entry present.
     ///
     /// References to sub-directories and files remain valid even after deleting their parent
-    /// directory, so writing to a file, after deleting its parent directory will re-create the
-    /// directory on the filesystem.
+    /// directory, so writing to a file after deleting its parent directory will re-create the
+    /// directory on the filesystem, and sync'ing the parent directory will delete the file.
     ///
     /// Make sure to call `sync` to delete any contents on the filesystem if it's possible for
     /// an new entry with the same name to be created later.
-    pub fn delete(&mut self, name: String) -> bool {
-        let exists = self.contents.contains_key(&name);
-        self.deleted.insert(name);
-        exists
+    pub fn delete(&mut self, name: String) -> Result<bool, io::Error> {
+        if let Some(entry) = self.contents.get(&name) {
+            self.deleted.insert(name);
+
+            match entry {
+                DirEntry::Dir(dir) => dir.delete_self()?,
+                DirEntry::File(file) => file.delete(true)?,
+            }
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Get the entry with the given `name` from this [`Dir`].
@@ -241,8 +250,15 @@ impl<FE> Dir<FE> {
             let mut deleted = HashSet::new();
             mem::swap(&mut deleted, &mut self.deleted);
             for name in deleted {
-                let _entry = self.contents.remove(&name).expect("deleted dir entry");
-                // TODO
+                let entry = self.contents.remove(&name).expect("deleted dir entry");
+                match entry {
+                    DirEntry::Dir(subdir) => {
+                        let mut subdir = subdir.write().await;
+                        subdir.sync().await?;
+                        fs::remove_dir_all(subdir.path()).await?;
+                    }
+                    DirEntry::File(file) => file.sync().await?,
+                }
             }
 
             for entry in self.contents.values() {
@@ -254,6 +270,19 @@ impl<FE> Dir<FE> {
 
             Ok(())
         })
+    }
+
+    fn delete_self(&mut self) -> Result<(), io::Error> {
+        for (name, entry) in self.contents.iter() {
+            self.deleted.insert(name.clone());
+
+            match entry {
+                DirEntry::Dir(dir) => dir.delete_self()?,
+                DirEntry::File(file) => file.delete(false)?,
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -380,27 +409,40 @@ impl<FE> DirLock<FE> {
     /// Recursively delete empty entries in this [`Dir`].
     /// Returns the number of entries in this [`Dir`].
     /// Call this function immediately after loading the cache to avoid the risk of deadlock.
-    pub fn trim(&self) -> Pin<Box<dyn Future<Output = usize> + '_>> {
-        Box::pin(async move {
-            let mut entries = self.write().await;
+    pub fn trim(&self) -> Result<usize, io::Error> {
+        let mut entries = self
+            .try_write()
+            .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))?;
 
-            let sizes = FuturesUnordered::new();
-            for (name, entry) in entries.iter() {
-                match entry {
-                    DirEntry::Dir(dir) => sizes.push(dir.trim().map(|size| (name.clone(), size))),
-                    DirEntry::File(_) => {}
+        let mut sizes = Vec::with_capacity(entries.len());
+        for (name, entry) in entries.iter() {
+            match entry {
+                DirEntry::Dir(dir) => {
+                    let size = dir.trim()?;
+                    sizes.push((name.clone(), size));
                 }
+                DirEntry::File(_) => {}
             }
+        }
 
-            let sizes = sizes.collect::<Vec<_>>().await;
-            for (name, size) in sizes {
-                if size == 0 {
-                    entries.delete(name);
-                }
+        for (name, size) in sizes {
+            if size == 0 {
+                entries.delete(name)?;
             }
+        }
 
-            entries.len()
-        })
+        Ok(entries.len())
+    }
+
+    fn delete_self(&self) -> Result<(), io::Error> {
+        let mut state = self.state.try_write().map_err(|cause| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!("directory to delete is still in use: {}", cause),
+            )
+        })?;
+
+        state.delete_self()
     }
 }
 

@@ -80,6 +80,13 @@ impl<FE> Cache<FE> {
         self.state.lock().expect("file cache state")
     }
 
+    fn remove(&self, path: &PathBuf, size: usize) {
+        let mut state = self.lock();
+        if state.files.remove(path).is_some() {
+            state.size -= size;
+        }
+    }
+
     fn resize(&self, old_size: usize, new_size: usize) {
         let mut state = self.lock();
         state.size += new_size;
