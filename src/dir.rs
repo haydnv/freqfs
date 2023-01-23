@@ -1,21 +1,21 @@
 use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::hash::Hash;
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::{fmt, mem};
 
 use futures::future::{Future, FutureExt};
-use futures::stream::{FuturesUnordered, StreamExt, TryStreamExt};
+use futures::stream::{FuturesUnordered, StreamExt};
 use log::warn;
 use tokio::fs;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::file::FileLock;
-use crate::Cache;
+use crate::{Cache, FileLoad};
 
 /// A directory entry, either a [`FileLock`] or a sub-[`DirLock`].
 #[derive(Clone)]
@@ -228,6 +228,33 @@ impl<FE> Dir<FE> {
             .filter(|name| !self.deleted.contains(*name))
             .count()
     }
+
+    /// Synchronize the contents of this directory with the filesystem.
+    ///
+    /// This will create new subdirectories and delete entries from the filesystem,
+    /// but will NOT synchronize the contents of any child directories or files.
+    pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + '_>>
+    where
+        FE: FileLoad,
+    {
+        Box::pin(async move {
+            let mut deleted = HashSet::new();
+            mem::swap(&mut deleted, &mut self.deleted);
+            for name in deleted {
+                let _entry = self.contents.remove(&name).expect("deleted dir entry");
+                // TODO
+            }
+
+            for entry in self.contents.values() {
+                match entry {
+                    DirEntry::Dir(dir) => dir.sync().await?,
+                    DirEntry::File(file) => file.sync().await?,
+                }
+            }
+
+            Ok(())
+        })
+    }
 }
 
 impl<FE> fmt::Debug for Dir<FE> {
@@ -238,13 +265,13 @@ impl<FE> fmt::Debug for Dir<FE> {
 
 /// A clone-able wrapper type over a [`tokio::sync::RwLock`] on a directory.
 pub struct DirLock<FE> {
-    inner: Arc<RwLock<Dir<FE>>>,
+    state: Arc<RwLock<Dir<FE>>>,
 }
 
 impl<FE> Clone for DirLock<FE> {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            state: self.state.clone(),
         }
     }
 }
@@ -259,7 +286,7 @@ impl<FE> DirLock<FE> {
         };
 
         Self {
-            inner: Arc::new(RwLock::new(dir)),
+            state: Arc::new(RwLock::new(dir)),
         }
     }
 
@@ -302,19 +329,19 @@ impl<FE> DirLock<FE> {
             };
 
             let inner = Arc::new(RwLock::new(dir));
-            Ok(DirLock { inner })
+            Ok(DirLock { state: inner })
         })
     }
 
     /// Lock this directory for reading.
     pub async fn read(&self) -> DirReadGuard<FE> {
-        let guard = self.inner.clone().read_owned().await;
+        let guard = self.state.clone().read_owned().await;
         DirReadGuard { guard }
     }
 
     /// Lock this directory for reading synchronously, if possible.
     pub fn try_read(&self) -> Result<DirReadGuard<FE>, io::Error> {
-        self.inner
+        self.state
             .clone()
             .try_read_owned()
             .map(|guard| DirReadGuard { guard })
@@ -323,88 +350,31 @@ impl<FE> DirLock<FE> {
 
     /// Lock this directory for writing.
     pub async fn write(&self) -> DirWriteGuard<FE> {
-        let guard = self.inner.clone().write_owned().await;
+        let guard = self.state.clone().write_owned().await;
         DirWriteGuard { guard }
     }
 
     /// Lock this directory for writing synchronously, if possible.
     pub fn try_write(&self) -> Result<DirWriteGuard<FE>, io::Error> {
-        self.inner
+        self.state
             .clone()
             .try_write_owned()
             .map(|guard| DirWriteGuard { guard })
             .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
     }
 
-    /// Synchronize this directory with the filesystem.
+    /// Synchronize the contents of this directory with the filesystem.
     ///
-    /// This will delete files and create subdirectories on the filesystem,
-    /// but it will not synchronize any file contents.
-    pub async fn sync(&self, err_if_locked: bool) -> Result<(), io::Error> {
-        let mut dir = if err_if_locked {
-            self.inner
-                .try_write()
-                .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))?
-        } else {
-            self.inner.write().await
-        };
-
-        let path = dir.path.clone();
-        let deleted: Vec<String> = dir.deleted.drain().collect();
-        let mut sync_deletes: FuturesUnordered<_> = deleted
-            .into_iter()
-            .filter_map(|name| dir.contents.remove(&name).map(|entry| (name, entry)))
-            .filter_map(|(name, entry)| {
-                let mut path = path.clone();
-                path.push(name);
-
-                if path.exists() {
-                    Some(async move {
-                        match entry {
-                            DirEntry::Dir(_) => fs::remove_dir_all(path).await,
-                            DirEntry::File(_) => fs::remove_file(path).await,
-                        }
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        while let Some(()) = sync_deletes.try_next().await? {
-            // nothing to do
-        }
-
-        let mut sync_creates: FuturesUnordered<_> = dir
-            .contents
-            .iter()
-            .filter_map(|(name, entry)| {
-                if entry.as_dir().is_some() {
-                    let mut path = path.clone();
-                    path.push(name);
-
-                    return Some(async move {
-                        while !path.exists() {
-                            match fs::create_dir_all(&path).await {
-                                Ok(()) => return Ok(()),
-                                Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => {}
-                                Err(cause) => return Err(cause),
-                            }
-                        }
-
-                        Ok(())
-                    });
-                }
-
-                None
-            })
-            .collect();
-
-        while let Some(()) = sync_creates.try_next().await? {
-            // nothing to do
-        }
-
-        Ok(())
+    /// This will create new subdirectories and delete entries from the filesystem,
+    /// but will NOT synchronize the contents of any child directories or files.
+    pub fn sync(&self) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + '_>>
+    where
+        FE: FileLoad,
+    {
+        Box::pin(async move {
+            let mut dir = self.state.write().await;
+            dir.sync().await
+        })
     }
 
     /// Recursively delete empty entries in this [`Dir`].

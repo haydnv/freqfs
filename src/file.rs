@@ -372,7 +372,10 @@ async fn create_parent(path: &Path) -> Result<(), io::Error> {
         while !parent.exists() {
             match tokio::fs::create_dir_all(parent).await {
                 Ok(()) => return Ok(()),
-                Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => {
+                    // this just means there's another file in the same directory
+                    // being sync'd at the same time
+                }
                 Err(cause) => return Err(cause),
             }
         }

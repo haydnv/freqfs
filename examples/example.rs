@@ -205,7 +205,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
 
     // but we can explicitly sync to delete the file on the filesystem
     std::mem::drop(root); // make sure to drop the write lock first
-    cache.sync(true).await?;
+    cache.sync().await?;
 
     // note that the delete happened even though `sub_dir` is still locked
     // so any writes to a file in `sub_dir` will re-create `sub_dir`
