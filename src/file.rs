@@ -19,7 +19,7 @@ const TMP: &'static str = "_freqfs";
 
 /// Load & save methods for a file data container type.
 #[async_trait]
-pub trait FileLoad: Sized {
+pub trait FileLoad: Send + Sync + Sized {
     async fn load(
         path: &Path,
         file: fs::File,
@@ -249,7 +249,15 @@ impl<FE> FileLock<FE> {
             }
             FileState::Deleted(size, file_only) => {
                 if *file_only {
-                    fs::remove_file(self.path()).await?;
+                    if self.path().exists() {
+                        match fs::remove_file(self.path()).await {
+                            Ok(()) => {}
+                            Err(cause) if cause.kind() == io::ErrorKind::NotFound => {
+                                // no-op
+                            }
+                            Err(cause) => return Err(cause),
+                        }
+                    }
                 }
 
                 self.inner.cache.remove(&self.inner.path, *size);
@@ -293,7 +301,7 @@ impl<FE> FileLock<FE> {
         let mut state = self.inner.contents.clone().try_write_owned().ok()?;
 
         let (old_size, contents, modified) = match &*state {
-            FileState::Pending => {
+            FileState::Pending | FileState::Deleted(_, _) => {
                 // in this case there's nothing to evict
                 return None;
             }
@@ -305,7 +313,6 @@ impl<FE> FileLock<FE> {
                 let contents = contents.clone().try_write_owned().ok()?;
                 (*size, contents, true)
             }
-            FileState::Deleted(_, _) => unreachable!("evict a deleted file"),
         };
 
         let eviction = async move {

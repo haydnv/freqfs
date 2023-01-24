@@ -242,7 +242,7 @@ impl<FE> Dir<FE> {
     ///
     /// This will create new subdirectories and delete entries from the filesystem,
     /// but will NOT synchronize the contents of any child directories or files.
-    pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + '_>>
+    pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + '_>>
     where
         FE: FileLoad,
     {
@@ -394,7 +394,7 @@ impl<FE> DirLock<FE> {
     ///
     /// This will create new subdirectories and delete entries from the filesystem,
     /// but will NOT synchronize the contents of any child directories or files.
-    pub fn sync(&self) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + '_>>
+    pub fn sync(&self) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + '_>>
     where
         FE: FileLoad,
     {
