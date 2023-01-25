@@ -250,13 +250,7 @@ impl<FE> FileLock<FE> {
             FileState::Deleted(file_only) => {
                 if *file_only {
                     if self.path().exists() {
-                        match fs::remove_file(self.path()).await {
-                            Ok(()) => {}
-                            Err(cause) if cause.kind() == io::ErrorKind::NotFound => {
-                                // no-op
-                            }
-                            Err(cause) => return Err(cause),
-                        }
+                        delete_file(self.path()).await?;
                     }
                 }
 
@@ -285,6 +279,25 @@ impl<FE> FileLock<FE> {
         self.inner.cache.remove(&self.inner.path, size);
 
         *file_state = FileState::Deleted(file_only);
+    }
+
+    pub(crate) async fn delete_and_sync(self) -> Result<(), io::Error> {
+        let file_state = self.inner.contents.write().await;
+
+        let size = match &*file_state {
+            FileState::Pending => 0,
+            FileState::Read(size, _) => *size,
+            FileState::Modified(size, _) => *size,
+            FileState::Deleted(_) => 0,
+        };
+
+        self.inner.cache.remove(&self.inner.path, size);
+
+        if self.path().exists() {
+            delete_file(self.path()).await
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn evict(self) -> Option<(usize, impl Future<Output = Result<(), io::Error>>)>
@@ -440,4 +453,15 @@ where
                 format!("invalid file type, expected {}", std::any::type_name::<F>()),
             )
         })
+}
+
+async fn delete_file(path: &Path) -> Result<(), io::Error> {
+    match fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => {
+            // no-op
+            Ok(())
+        }
+        Err(cause) => Err(cause),
+    }
 }

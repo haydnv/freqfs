@@ -246,6 +246,27 @@ impl<FE: FileLoad> Dir<FE> {
         })
     }
 
+    /// Delete the entry with the given `name` from this [`Dir`] and the filesystem.
+    ///
+    /// Returns `true` if there was an entry present.
+    pub fn delete_and_sync(
+        &mut self,
+        name: String,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, io::Error>> + Send + '_>> {
+        Box::pin(async move {
+            if let Some(entry) = self.contents.remove(&name) {
+                match entry {
+                    DirEntry::Dir(dir) => dir.delete_and_sync_self(false).await?,
+                    DirEntry::File(file) => file.delete_and_sync().await?,
+                }
+
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })
+    }
+
     /// Synchronize the contents of this directory with the filesystem.
     ///
     /// This will create new subdirectories and delete entries from the filesystem,
@@ -254,13 +275,13 @@ impl<FE: FileLoad> Dir<FE> {
         Box::pin(async move {
             let mut deleted = HashSet::new();
             mem::swap(&mut deleted, &mut self.deleted);
+
             for name in deleted {
                 let entry = self.contents.remove(&name).expect("deleted dir entry");
                 match entry {
                     DirEntry::Dir(subdir) => {
-                        let mut subdir = subdir.write().await;
-                        subdir.sync().await?;
-                        fs::remove_dir_all(subdir.path()).await?;
+                        let subdir = subdir.write().await;
+                        delete_dir(subdir.path()).await?;
                     }
                     DirEntry::File(file) => file.sync().await?,
                 }
@@ -286,6 +307,28 @@ impl<FE: FileLoad> Dir<FE> {
                     DirEntry::Dir(dir) => dir.delete_self().await,
                     DirEntry::File(file) => file.delete(false).await,
                 }
+            }
+        })
+    }
+
+    fn delete_and_sync_self(
+        &mut self,
+        is_child: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + '_>> {
+        Box::pin(async move {
+            for (_name, entry) in self.contents.drain() {
+                match entry {
+                    DirEntry::Dir(dir) => dir.delete_and_sync_self(true).await?,
+                    DirEntry::File(file) => file.delete(false).await,
+                }
+            }
+
+            if is_child {
+                Ok(()) // the parent directory will be deleted, no need to actually sync here
+            } else if self.path.exists() {
+                Ok(()) // no-op
+            } else {
+                delete_dir(&self.path).await
             }
         })
     }
@@ -439,6 +482,16 @@ impl<FE: FileLoad> DirLock<FE> {
             state.delete_self().await
         })
     }
+
+    fn delete_and_sync_self(
+        &self,
+        is_child: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + '_>> {
+        Box::pin(async move {
+            let mut state = self.state.write().await;
+            state.delete_and_sync_self(is_child).await
+        })
+    }
 }
 
 /// A read lock on a directory.
@@ -470,5 +523,13 @@ impl<FE> Deref for DirWriteGuard<FE> {
 impl<FE> DerefMut for DirWriteGuard<FE> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.guard.deref_mut()
+    }
+}
+
+async fn delete_dir(path: &Path) -> Result<(), io::Error> {
+    match fs::remove_dir_all(path).await {
+        Ok(()) => Ok(()),
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(cause) => Err(cause),
     }
 }
