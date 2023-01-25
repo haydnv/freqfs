@@ -196,15 +196,15 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
         assert_eq!(&*contents, "नमस्ते दुनिया!");
 
         // so the contents of "vector.bin" will be automatically sync'd and removed from main memory
-        tokio::time::sleep(Duration::from_millis(15)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
 
     // now it's safe to delete the entries whose locks have been dropped
 
     // deleting is a synchronous operation operation since it happens in-memory only
-    assert!(root.delete("hello.txt".to_string()).expect("delete"));
+    assert!(root.delete("hello.txt".to_string()).await);
     assert!(root.get("hello.txt").is_none());
-    assert!(root.delete("subdir".to_string()).expect("delete"));
+    assert!(root.delete("subdir".to_string()).await);
     assert!(root.get("subdir").is_none());
 
     // but we can explicitly sync to delete the file on the filesystem
@@ -222,7 +222,7 @@ async fn main() -> Result<(), io::Error> {
     let path = setup_tmp_dir().await?;
 
     // initialize the cache
-    let cache = Cache::new(40, Duration::from_millis(10), None);
+    let cache = Cache::new(40, None);
 
     // load the directory and file paths into memory (not file contents, yet)
     let root = cache.load(path.clone())?;

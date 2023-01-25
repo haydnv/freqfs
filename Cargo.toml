@@ -1,6 +1,6 @@
 [package]
 name = "freqfs"
-version = "0.6.0"
+version = "0.6.1"
 authors = ["code@tinychain.net"]
 edition = "2021"
 license = "Apache-2.0"
@@ -20,7 +20,7 @@ freqache = "0.6"
 futures = "0.3"
 log = "0.4"
 safecast = "~0.1.4"
-tokio = { version = "1.24", features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.24", features = ["fs", "io-util", "rt-multi-thread", "sync"] }
 
 [dev-dependencies]
 rand = "0.8"

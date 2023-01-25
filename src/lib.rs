@@ -23,10 +23,10 @@
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
 
 use futures::future::Future;
 use futures::stream::{FuturesUnordered, StreamExt};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 mod dir;
 mod file;
@@ -52,14 +52,30 @@ impl<FE> State<FE> {
     }
 }
 
+#[derive(Debug)]
+struct Evict;
+
 /// An in-memory cache layer over [`tokio::fs`] with least-frequently-used (LFU) eviction.
 pub struct Cache<FE> {
     capacity: usize,
     max_file_handles: usize,
     state: Mutex<State<FE>>,
+    tx: UnboundedSender<Evict>,
 }
 
 impl<FE> Cache<FE> {
+    #[inline]
+    fn check(&self, state: MutexGuard<State<FE>>) {
+        if state.size > self.capacity {
+            self.tx.send(Evict).expect("cache cleanup thread");
+        }
+    }
+
+    #[inline]
+    fn lock(&self) -> MutexGuard<State<FE>> {
+        self.state.lock().expect("file cache state")
+    }
+
     fn bump(&self, path: &PathBuf, file_size: usize, newly_loaded: bool) -> bool {
         let mut state = self.lock();
 
@@ -67,30 +83,35 @@ impl<FE> Cache<FE> {
             state.size += file_size;
         }
 
-        state.files.bump(path)
+        let exists = state.files.bump(path);
+        self.check(state);
+        exists
     }
 
     fn insert(&self, path: PathBuf, file: FileLock<FE>, file_size: usize) {
         let mut state = self.lock();
         state.files.insert(path, file);
         state.size += file_size;
-    }
 
-    fn lock(&self) -> MutexGuard<State<FE>> {
-        self.state.lock().expect("file cache state")
+        self.check(state)
     }
 
     fn remove(&self, path: &PathBuf, size: usize) {
         let mut state = self.lock();
+
         if state.files.remove(path).is_some() {
             state.size -= size;
         }
+
+        self.check(state)
     }
 
     fn resize(&self, old_size: usize, new_size: usize) {
         let mut state = self.lock();
         state.size += new_size;
         state.size -= old_size;
+
+        self.check(state)
     }
 }
 
@@ -104,20 +125,18 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
     /// This function should only be called once.
     ///
     /// Panics: if `max_file_handles` is `Some(0)`
-    pub fn new(
-        capacity: usize,
-        cleanup_interval: Duration,
-        max_file_handles: Option<usize>,
-    ) -> Arc<Self> {
+    pub fn new(capacity: usize, max_file_handles: Option<usize>) -> Arc<Self> {
         let max_file_handles = max_file_handles.unwrap_or(MAX_FILE_HANDLES);
+        let (tx, rx) = mpsc::unbounded_channel();
 
         let cache = Arc::new(Self {
             capacity,
             max_file_handles,
             state: Mutex::new(State::new()),
+            tx,
         });
 
-        spawn_cleanup_thread(cache.clone(), cleanup_interval);
+        spawn_cleanup_thread(cache.clone(), rx);
 
         cache
     }
@@ -147,7 +166,9 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
 
     fn gc(&self) -> FuturesUnordered<impl Future<Output = Result<(), io::Error>>> {
         let evictions = FuturesUnordered::new();
+
         let state = self.lock();
+
         if state.size < self.capacity {
             return evictions;
         }
@@ -169,22 +190,18 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
     }
 }
 
-fn spawn_cleanup_thread<FE: FileLoad + Send + Sync + 'static>(
+fn spawn_cleanup_thread<FE: FileLoad>(
     cache: Arc<Cache<FE>>,
-    interval: Duration,
+    mut rx: UnboundedReceiver<Evict>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        loop {
+        while let Some(Evict) = rx.recv().await {
             let mut evictions = cache.gc();
 
-            if evictions.is_empty() {
-                tokio::time::sleep(interval).await
-            } else {
-                while let Some(result) = evictions.next().await {
-                    match result {
-                        Ok(()) => {}
-                        Err(cause) => panic!("failed to evict file from cache: {}", cause),
-                    }
+            while let Some(result) = evictions.next().await {
+                match result {
+                    Ok(()) => {}
+                    Err(cause) => panic!("failed to evict file from cache: {}", cause),
                 }
             }
         }

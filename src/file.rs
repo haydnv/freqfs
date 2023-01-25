@@ -19,7 +19,7 @@ const TMP: &'static str = "_freqfs";
 
 /// Load & save methods for a file data container type.
 #[async_trait]
-pub trait FileLoad: Send + Sync + Sized {
+pub trait FileLoad: Send + Sync + Sized + 'static {
     async fn load(
         path: &Path,
         file: fs::File,
@@ -33,14 +33,14 @@ enum FileState<FE> {
     Pending,
     Read(usize, Arc<RwLock<FE>>),
     Modified(usize, Arc<RwLock<FE>>),
-    Deleted(usize, bool),
+    Deleted(bool),
 }
 
 impl<FE> FileState<FE> {
     #[inline]
     fn is_pending(&self) -> bool {
         match self {
-            Self::Pending | Self::Deleted(_, _) => true,
+            Self::Pending | Self::Deleted(_) => true,
             _ => false,
         }
     }
@@ -48,7 +48,7 @@ impl<FE> FileState<FE> {
     #[inline]
     fn upgrade(&mut self) {
         let (size, lock) = match self {
-            Self::Pending | Self::Deleted(_, _) => panic!("cannot write a pending cache entry"),
+            Self::Pending | Self::Deleted(_) => panic!("cannot write a pending cache entry"),
             Self::Read(size, lock) => (*size, lock.clone()),
             Self::Modified(_size, _lock) => return,
         };
@@ -149,7 +149,7 @@ impl<FE> FileLock<FE> {
         };
 
         match &*file_state {
-            FileState::Pending | FileState::Deleted(_, _) => unreachable!("read a pending file"),
+            FileState::Pending | FileState::Deleted(_) => unreachable!("read a pending file"),
             FileState::Read(size, contents) | FileState::Modified(size, contents) => {
                 self.inner.cache.bump(&self.inner.path, *size, newly_loaded);
                 Ok(contents.clone())
@@ -172,7 +172,7 @@ impl<FE> FileLock<FE> {
         }
 
         match &*file_state {
-            FileState::Pending | FileState::Deleted(_, _) => {
+            FileState::Pending | FileState::Deleted(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "file is not in cache",
@@ -247,7 +247,7 @@ impl<FE> FileLock<FE> {
                 self.inner.cache.resize(*old_size, new_size as usize);
                 FileState::Read(new_size as usize, lock.clone())
             }
-            FileState::Deleted(size, file_only) => {
+            FileState::Deleted(file_only) => {
                 if *file_only {
                     if self.path().exists() {
                         match fs::remove_file(self.path()).await {
@@ -260,7 +260,6 @@ impl<FE> FileLock<FE> {
                     }
                 }
 
-                self.inner.cache.remove(&self.inner.path, *size);
                 return Ok(());
             }
             _ => {
@@ -273,24 +272,19 @@ impl<FE> FileLock<FE> {
         Ok(())
     }
 
-    pub(crate) fn delete(&self, file_only: bool) -> Result<(), io::Error> {
-        let mut file_state = self.inner.contents.try_write().map_err(|cause| {
-            io::Error::new(
-                io::ErrorKind::WouldBlock,
-                format!("cannot delete a file that's still in use: {}", cause),
-            )
-        })?;
+    pub(crate) async fn delete(&self, file_only: bool) {
+        let mut file_state = self.inner.contents.write().await;
 
         let size = match &*file_state {
             FileState::Pending => 0,
             FileState::Read(size, _) => *size,
             FileState::Modified(size, _) => *size,
-            FileState::Deleted(size, _) => *size,
+            FileState::Deleted(_) => return,
         };
 
-        *file_state = FileState::Deleted(size, file_only);
+        self.inner.cache.remove(&self.inner.path, size);
 
-        Ok(())
+        *file_state = FileState::Deleted(file_only);
     }
 
     pub(crate) fn evict(self) -> Option<(usize, impl Future<Output = Result<(), io::Error>>)>
@@ -301,7 +295,7 @@ impl<FE> FileLock<FE> {
         let mut state = self.inner.contents.clone().try_write_owned().ok()?;
 
         let (old_size, contents, modified) = match &*state {
-            FileState::Pending | FileState::Deleted(_, _) => {
+            FileState::Pending => {
                 // in this case there's nothing to evict
                 return None;
             }
@@ -313,6 +307,7 @@ impl<FE> FileLock<FE> {
                 let contents = contents.clone().try_write_owned().ok()?;
                 (*size, contents, true)
             }
+            FileState::Deleted(_) => unreachable!("evict a deleted file"),
         };
 
         let eviction = async move {
