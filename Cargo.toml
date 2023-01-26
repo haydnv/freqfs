@@ -1,6 +1,6 @@
 [package]
 name = "freqfs"
-version = "0.7"
+version = "0.7.0"
 authors = ["code@tinychain.net"]
 edition = "2021"
 license = "Apache-2.0"
