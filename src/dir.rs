@@ -77,8 +77,7 @@ impl<FE: FileLoad> Dir<FE> {
             }
         }
 
-        let mut path = self.path.clone();
-        path.push(&name);
+        let path = self.path.join(&name);
 
         let lock = DirLock::new(self.cache.clone(), path);
 
@@ -104,8 +103,7 @@ impl<FE: FileLoad> Dir<FE> {
             }
         }
 
-        let mut path = self.path.clone();
-        path.push(&name);
+        let path = self.path.join(&name);
 
         let lock = DirLock::new(self.cache.clone(), path);
         self.contents.insert(name, DirEntry::Dir(lock.clone()));
@@ -209,8 +207,7 @@ impl<FE: FileLoad> Dir<FE> {
             }
         }
 
-        let mut path = self.path.clone();
-        path.push(&name);
+        let path = self.path.join(&name);
 
         let lock = FileLock::new(self.cache.clone(), path.clone(), contents, size);
         self.contents.insert(name, DirEntry::File(lock.clone()));
