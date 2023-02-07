@@ -16,7 +16,7 @@ name = "example"
 
 [dependencies]
 async-trait = "0.1"
-freqache = "0.6"
+ds-ext = { path = "../ds-ext" }
 futures = "0.3"
 log = "0.4"
 safecast = "~0.1.4"

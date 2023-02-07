@@ -11,7 +11,7 @@ use super::file::{FileLoad, FileLock};
 
 const MAX_FILE_HANDLES: usize = 512;
 
-type LFU<FE> = freqache::LFUCache<PathBuf, FileLock<FE>>;
+type LFU<FE> = ds_ext::LinkedHashMap<PathBuf, FileLock<FE>>;
 
 struct State<FE> {
     files: LFU<FE>,
