@@ -1,6 +1,4 @@
-use std::borrow::Borrow;
-use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
+use std::cmp::Ordering;
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -8,6 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, mem};
 
+use ds_ext::{OrdHashMap, OrdHashSet};
 use futures::future::Future;
 use log::warn;
 use tokio::fs;
@@ -15,6 +14,49 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::file::FileLock;
 use crate::{Cache, FileLoad};
+
+/// A type that can be used to look up a directory entry without calling `to_string()`,
+/// to avoid unnecessary heap allocations.
+pub trait Name {
+    fn partial_cmp(&self, key: &String) -> Option<Ordering>;
+}
+
+impl Name for String {
+    fn partial_cmp(&self, key: &String) -> Option<Ordering> {
+        PartialOrd::partial_cmp(self, key)
+    }
+}
+
+impl Name for str {
+    fn partial_cmp(&self, key: &String) -> Option<Ordering> {
+        PartialOrd::partial_cmp(self, key.as_str())
+    }
+}
+
+#[macro_export]
+macro_rules! name_from_str {
+    ($t:ty) => {
+        impl Name for $t {
+            fn partial_cmp(&self, key: &String) -> Option<std::cmp::Ordering> {
+                let key = key.parse().ok()?;
+                std::cmp::PartialOrd::partial_cmp(self, &key)
+            }
+        }
+    };
+}
+
+name_from_str!(u8);
+name_from_str!(u16);
+name_from_str!(u32);
+name_from_str!(u64);
+name_from_str!(u128);
+name_from_str!(usize);
+name_from_str!(i8);
+name_from_str!(i16);
+name_from_str!(i32);
+name_from_str!(i64);
+name_from_str!(i128);
+name_from_str!(uuid::Uuid);
 
 /// A directory entry, either a [`FileLock`] or a sub-[`DirLock`].
 #[derive(Clone)]
@@ -45,8 +87,8 @@ impl<FE> DirEntry<FE> {
 pub struct Dir<FE> {
     path: PathBuf,
     cache: Arc<Cache<FE>>,
-    contents: HashMap<String, DirEntry<FE>>,
-    deleted: HashSet<String>,
+    contents: OrdHashMap<String, DirEntry<FE>>,
+    deleted: OrdHashSet<String>,
 }
 
 impl<FE: FileLoad> Dir<FE> {
@@ -56,11 +98,11 @@ impl<FE: FileLoad> Dir<FE> {
     }
 
     /// Return `true` if this [`Dir`] has an entry with the given `name`.
-    pub fn contains<N: Borrow<str>>(&self, name: N) -> bool {
-        if self.deleted.contains(name.borrow()) {
+    pub fn contains<Q: Name + ?Sized>(&self, name: &Q) -> bool {
+        if self.deleted.bisect(partial_cmp(name)).is_some() {
             false
         } else {
-            self.contents.contains_key(name.borrow())
+            self.contents.bisect(partial_cmp(name)).is_some()
         }
     }
 
@@ -111,28 +153,22 @@ impl<FE: FileLoad> Dir<FE> {
     }
 
     /// Get the entry with the given `name` from this [`Dir`].
-    pub fn get<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<&DirEntry<FE>>
-    where
-        String: Borrow<Q>,
-    {
-        if self.deleted.contains(name.borrow()) {
+    pub fn get<Q: Name + ?Sized>(&self, name: &Q) -> Option<&DirEntry<FE>> {
+        if self.deleted.bisect(partial_cmp(name)).is_some() {
             None
         } else {
-            self.contents.get(name)
+            self.contents.bisect(partial_cmp(name))
         }
     }
 
     /// Get the subdirectory with the given `name` from this [`Dir`], if present.
     ///
     /// Also returns `None` if the entry at `name` is a file.
-    pub fn get_dir<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<&DirLock<FE>>
-    where
-        String: Borrow<Q>,
-    {
-        if self.deleted.contains(name.borrow()) {
+    pub fn get_dir<Q: Name + ?Sized>(&self, name: &Q) -> Option<&DirLock<FE>> {
+        if self.deleted.bisect(partial_cmp(name)).is_some() {
             None
         } else {
-            match self.contents.get(name) {
+            match self.contents.bisect(partial_cmp(name)) {
                 Some(DirEntry::Dir(dir_lock)) => Some(dir_lock),
                 _ => None,
             }
@@ -142,14 +178,11 @@ impl<FE: FileLoad> Dir<FE> {
     /// Get the file with the given `name` from this [`Dir`], if present.
     ///
     /// Also returns `None` if the entry at `name` is a directory.
-    pub fn get_file<Q: Eq + Hash + ?Sized>(&self, name: &Q) -> Option<FileLock<FE>>
-    where
-        String: Borrow<Q>,
-    {
-        if self.deleted.contains(name.borrow()) {
+    pub fn get_file<Q: Name + ?Sized>(&self, name: &Q) -> Option<FileLock<FE>> {
+        if self.deleted.bisect(partial_cmp(name)).is_some() {
             None
         } else {
-            match self.contents.get(name) {
+            match self.contents.bisect(partial_cmp(name)) {
                 Some(DirEntry::File(file_lock)) => Some(file_lock.clone()),
                 _ => None,
             }
@@ -270,7 +303,7 @@ impl<FE: FileLoad> Dir<FE> {
     /// but will NOT synchronize the contents of any child directories or files.
     pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + '_>> {
         Box::pin(async move {
-            let mut deleted = HashSet::new();
+            let mut deleted = OrdHashSet::new();
             mem::swap(&mut deleted, &mut self.deleted);
 
             for name in deleted {
@@ -355,8 +388,8 @@ impl<FE: FileLoad> DirLock<FE> {
         let dir = Dir {
             path,
             cache,
-            contents: HashMap::new(),
-            deleted: HashSet::new(),
+            contents: OrdHashMap::new(),
+            deleted: OrdHashSet::new(),
         };
 
         Self {
@@ -366,7 +399,7 @@ impl<FE: FileLoad> DirLock<FE> {
 
     // This doesn't need to be async since it's only called at initialization time
     pub(crate) fn load<'a>(cache: Arc<Cache<FE>>, path: PathBuf) -> Result<Self, io::Error> {
-        let mut contents = HashMap::new();
+        let mut contents = OrdHashMap::new();
         let mut handles = std::fs::read_dir(&path)?;
 
         while let Some(handle) = handles.next() {
@@ -395,7 +428,7 @@ impl<FE: FileLoad> DirLock<FE> {
             path,
             cache,
             contents,
-            deleted: HashSet::new(),
+            deleted: OrdHashSet::new(),
         };
 
         let inner = Arc::new(RwLock::new(dir));
@@ -529,4 +562,12 @@ async fn delete_dir(path: &Path) -> Result<(), io::Error> {
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(cause) => Err(cause),
     }
+}
+
+#[inline]
+fn partial_cmp<'a, Q>(name: &'a Q) -> impl Fn(&String) -> Option<Ordering> + Copy + 'a
+where
+    Q: Name + ?Sized,
+{
+    |key| Name::partial_cmp(name, key)
 }
