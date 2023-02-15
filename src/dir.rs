@@ -11,6 +11,7 @@ use futures::future::Future;
 use log::warn;
 use tokio::fs;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use uuid::Uuid;
 
 use crate::file::FileLock;
 use crate::{Cache, FileLoad};
@@ -246,6 +247,24 @@ impl<FE: FileLoad> Dir<FE> {
         self.contents.insert(name, DirEntry::File(lock.clone()));
         self.cache.insert(path, lock.clone(), size);
         Ok(lock)
+    }
+
+    /// Create a new file in this [`Dir`] with a unique name and the given `contents`.
+    pub fn create_file_unique<F>(
+        &mut self,
+        contents: F,
+        size: usize,
+    ) -> Result<(Uuid, FileLock<FE>), io::Error>
+    where
+        FE: From<F>,
+    {
+        let mut name = Uuid::new_v4();
+        while self.contains(&name) {
+            name = Uuid::new_v4();
+        }
+
+        self.create_file(name.to_string(), contents, size)
+            .map(|file| (name, file))
     }
 
     /// Delete the entry with the given `name` from this [`Dir`].
