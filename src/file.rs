@@ -391,13 +391,23 @@ async fn persist<FE: FileLoad>(path: &Path, file: &FE) -> Result<u64, io::Error>
                 .open(tmp.as_path())
                 .await?
         } else {
-            if let Some(parent) = tmp.parent() {
-                if !parent.exists() {
-                    create_dir(parent).await?;
+            loop {
+                match fs::File::create(tmp.as_path()).await {
+                    Ok(file) => break file,
+                    Err(cause) => match cause.kind() {
+                        io::ErrorKind::NotFound => {
+                            let parent = tmp.parent().expect("dir");
+                            create_dir(parent).await?;
+                        }
+                        error_kind => {
+                            return Err(io::Error::new(
+                                error_kind,
+                                format!("failed to create tmp file: {}", cause),
+                            ))
+                        }
+                    },
                 }
             }
-
-            fs::File::create(tmp.as_path()).await?
         };
 
         let size = file.save(&mut tmp_file).await?;
