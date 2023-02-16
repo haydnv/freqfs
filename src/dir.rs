@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::{fmt, mem};
 
 use ds_ext::{OrdHashMap, OrdHashSet};
-use futures::future::{Future, TryFutureExt};
+use futures::future::Future;
 use log::warn;
 use safecast::AsType;
 use tokio::fs;
@@ -15,7 +15,7 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use uuid::Uuid;
 
 use crate::file::FileLock;
-use crate::{Cache, FileLoad, FileReadGuard};
+use crate::{Cache, FileLoad, FileReadGuard, FileWriteGuard};
 
 /// A type that can be used to look up a directory entry without calling `to_string()`,
 /// to avoid unnecessary heap allocations.
@@ -191,19 +191,6 @@ impl<FE: FileLoad> Dir<FE> {
         }
     }
 
-    /// Convenience method to lock a file for reading, if present.
-    pub async fn read_file<Q, F>(&self, name: &Q) -> Result<Option<FileReadGuard<FE, F>>, io::Error>
-    where
-        Q: Name + ?Sized,
-        FE: FileLoad + AsType<F>,
-    {
-        if let Some(file) = self.get_file(name) {
-            file.read().map_ok(Some).await
-        } else {
-            Ok(None)
-        }
-    }
-
     /// Return `true` if this [`Dir`] contains no entries.
     pub fn is_empty(&self) -> bool {
         if self.contents.is_empty() {
@@ -230,6 +217,34 @@ impl<FE: FileLoad> Dir<FE> {
             .keys()
             .filter(|name| !self.deleted.contains(*name))
             .count()
+    }
+
+    /// Convenience method to lock a file for reading, if present.
+    /// Returns a "not found" error if the there is no file with the given `name`.
+    pub async fn read_file<Q, F>(&self, name: &Q) -> Result<FileReadGuard<FE, F>, io::Error>
+    where
+        Q: Name + fmt::Display + ?Sized,
+        FE: FileLoad + AsType<F>,
+    {
+        if let Some(file) = self.get_file(name) {
+            file.read().await
+        } else {
+            Err(io::Error::new(io::ErrorKind::NotFound, name.to_string()))
+        }
+    }
+
+    /// Convenience method to lock a file for writing.
+    /// Returns a "not found" error if the there is no file with the given `name`.
+    pub async fn write_file<Q, F>(&self, name: &Q) -> Result<FileWriteGuard<FE, F>, io::Error>
+    where
+        Q: Name + fmt::Display + ?Sized,
+        FE: FileLoad + AsType<F>,
+    {
+        if let Some(file) = self.get_file(name) {
+            file.write().await
+        } else {
+            Err(io::Error::new(io::ErrorKind::NotFound, name.to_string()))
+        }
     }
 }
 
