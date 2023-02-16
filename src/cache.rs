@@ -5,10 +5,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use futures::future::Future;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::time::Duration;
 
 use super::dir::DirLock;
 use super::file::{FileLoad, FileLock};
 
+const GC_CYCLE_TIME: Duration = Duration::from_millis(10);
 const MAX_FILE_HANDLES: usize = 512;
 
 type LFU<FE> = ds_ext::LinkedHashMap<PathBuf, FileLock<FE>>;
@@ -188,7 +190,7 @@ fn spawn_cleanup_thread<FE: FileLoad>(
             }
 
             // let the filesystem catch up in case there's another gc cycle immediately after this
-            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+            tokio::time::sleep(GC_CYCLE_TIME).await;
         }
     })
 }

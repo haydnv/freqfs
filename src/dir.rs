@@ -7,14 +7,15 @@ use std::sync::Arc;
 use std::{fmt, mem};
 
 use ds_ext::{OrdHashMap, OrdHashSet};
-use futures::future::Future;
+use futures::future::{Future, TryFutureExt};
 use log::warn;
+use safecast::AsType;
 use tokio::fs;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use uuid::Uuid;
 
 use crate::file::FileLock;
-use crate::{Cache, FileLoad};
+use crate::{Cache, FileLoad, FileReadGuard};
 
 /// A type that can be used to look up a directory entry without calling `to_string()`,
 /// to avoid unnecessary heap allocations.
@@ -187,6 +188,19 @@ impl<FE: FileLoad> Dir<FE> {
                 Some(DirEntry::File(file_lock)) => Some(file_lock.clone()),
                 _ => None,
             }
+        }
+    }
+
+    /// Convenience method to lock a file for reading, if present.
+    pub async fn read_file<Q, F>(&self, name: &Q) -> Result<Option<FileReadGuard<FE, F>>, io::Error>
+    where
+        Q: Name + ?Sized,
+        FE: FileLoad + AsType<F>,
+    {
+        if let Some(file) = self.get_file(name) {
+            file.read().map_ok(Some).await
+        } else {
+            Ok(None)
         }
     }
 
