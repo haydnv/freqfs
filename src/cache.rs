@@ -102,6 +102,13 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
     /// Panics: if `max_file_handles` is `Some(0)`
     pub fn new(capacity: usize, max_file_handles: Option<usize>) -> Arc<Self> {
         let max_file_handles = max_file_handles.unwrap_or(MAX_FILE_HANDLES);
+
+        assert!(
+            max_file_handles > 0,
+            "invalid config for max_file_handles: {}",
+            max_file_handles
+        );
+
         let (tx, rx) = mpsc::unbounded_channel();
 
         let cache = Arc::new(Self {
@@ -179,6 +186,9 @@ fn spawn_cleanup_thread<FE: FileLoad>(
                     Err(cause) => panic!("failed to evict file from cache: {}", cause),
                 }
             }
+
+            // let the filesystem catch up in case there's another gc cycle immediately after this
+            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
         }
     })
 }

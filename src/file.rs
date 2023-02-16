@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::Future;
+use futures::{Future, TryFutureExt};
 use safecast::AsType;
 use tokio::fs;
 use tokio::sync::{
@@ -391,48 +391,76 @@ async fn persist<FE: FileLoad>(path: &Path, file: &FE) -> Result<u64, io::Error>
                 .open(tmp.as_path())
                 .await?
         } else {
-            loop {
-                match fs::File::create(tmp.as_path()).await {
-                    Ok(file) => break file,
-                    Err(cause) => match cause.kind() {
-                        io::ErrorKind::NotFound => {
-                            let parent = tmp.parent().expect("dir");
-                            create_dir(parent).await?;
-                        }
-                        error_kind => {
-                            return Err(io::Error::new(
-                                error_kind,
-                                format!("failed to create tmp file: {}", cause),
-                            ))
-                        }
-                    },
-                }
+            let parent = tmp.parent().expect("dir");
+            let mut i = 0;
+            while !parent.exists() {
+                create_dir(parent).await?;
+                tokio::time::sleep(tokio::time::Duration::from_millis(i)).await;
+                i += 1;
             }
+
+            assert!(parent.exists());
+
+            fs::File::create(tmp.as_path())
+                .map_err(|cause| {
+                    io::Error::new(
+                        cause.kind(),
+                        format!("failed to create tmp file: {}", cause),
+                    )
+                })
+                .await?
         };
 
-        let size = file.save(&mut tmp_file).await?;
-        tmp_file.sync_all().await?;
+        assert!(tmp.exists());
+        assert!(!tmp.is_dir());
+
+        let size = file
+            .save(&mut tmp_file)
+            .map_err(|cause| {
+                io::Error::new(cause.kind(), format!("failed to save tmp file: {}", cause))
+            })
+            .await?;
+
+        tmp_file
+            .sync_all()
+            .map_err(|cause| {
+                io::Error::new(cause.kind(), format!("failed to sync tmp file: {}", cause))
+            })
+            .await?;
+
         size
     };
 
-    tokio::fs::rename(tmp.as_path(), path).await?;
+    tokio::fs::rename(tmp.as_path(), path)
+        .map_err(|cause| {
+            io::Error::new(
+                cause.kind(),
+                format!("failed to rename tmp file: {}", cause),
+            )
+        })
+        .await?;
 
     Ok(size)
 }
 
 async fn create_dir(path: &Path) -> Result<(), io::Error> {
-    while !path.exists() {
+    if path.exists() {
+        Ok(())
+    } else {
         match tokio::fs::create_dir_all(path).await {
-            Ok(()) => return Ok(()),
-            Err(cause) if cause.kind() == io::ErrorKind::AlreadyExists => {
-                // this just means there's another file in the same directory
-                // being sync'd at the same time
+            Ok(()) => Ok(()),
+            Err(cause) => {
+                if path.exists() && path.is_dir() {
+                    Ok(())
+                } else {
+                    return Err(io::Error::new(
+                        cause.kind(),
+                        format!("failed to create directory: {}", cause),
+                    ));
+                }
             }
-            Err(cause) => return Err(cause),
         }
     }
-
-    Ok(())
 }
 
 #[inline]
