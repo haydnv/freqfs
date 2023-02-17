@@ -150,7 +150,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
 
         {
             // to load a file into memory, acquire a lock on its contents
-            let mut contents: FileWriteGuard<File, String> = text_file.write().await?;
+            let mut contents: FileWriteGuard<String> = text_file.write().await?;
             assert_eq!(&*contents, "Hello, world!");
 
             // then they can be mutated purely in-memory
@@ -158,7 +158,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
         }
 
         {
-            let contents: FileReadGuard<File, String> = text_file.read().await?;
+            let contents: FileReadGuard<String> = text_file.read().await?;
             assert_eq!(&*contents, "नमस्ते दुनिया!");
         }
 
@@ -181,7 +181,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
             sub_sub_dir.create_file("vector.bin".to_string(), (0..25).collect::<Vec<u8>>(), 25)?;
 
         // then lock it so its data won't be evicted
-        let binary_file: FileReadGuard<File, Vec<u8>> = binary_file.read().await?;
+        let binary_file: FileReadGuard<Vec<u8>> = binary_file.read().await?;
 
         // now the cache is full, so the contents of "hello.txt" will be automatically sync'd
         // and removed from main memory
@@ -192,7 +192,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
 
         // then loading "hello.txt" again will fill the cache
         let text_file = root.get_file("hello.txt").expect("text file");
-        let contents: FileReadGuard<File, String> = text_file.read().await?;
+        let contents: FileReadGuard<String> = text_file.read().await?;
         assert_eq!(&*contents, "नमस्ते दुनिया!");
 
         // so the contents of "vector.bin" will be automatically sync'd and removed from main memory

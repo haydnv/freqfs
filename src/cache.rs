@@ -53,10 +53,10 @@ impl<FE> Cache<FE> {
         self.state.lock().expect("file cache state")
     }
 
-    pub(crate) fn bump(&self, path: &PathBuf, file_size: usize, newly_loaded: bool) -> bool {
+    pub(crate) fn bump(&self, path: &PathBuf, file_size: Option<usize>) -> bool {
         let mut state = self.lock();
 
-        if newly_loaded {
+        if let Some(file_size) = file_size {
             state.size += file_size;
         }
 
