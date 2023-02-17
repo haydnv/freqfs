@@ -118,13 +118,6 @@ impl<FE> FileLock<FE> {
         F: 'a,
         FE: FileLoad + AsType<F>,
     {
-        if let Ok(maybe_file) = self.file.try_read() {
-            if maybe_file.is_some() {
-                self.cache.bump(&self.path, None);
-                return read_type(maybe_file);
-            }
-        }
-
         let mut state = self.state.write().await;
 
         if state.is_deleted() {
@@ -172,13 +165,6 @@ impl<FE> FileLock<FE> {
     where
         FE: FileLoad + AsType<F>,
     {
-        if let Ok(maybe_file) = self.file.clone().try_read_owned() {
-            if maybe_file.is_some() {
-                self.cache.bump(&self.path, None);
-                return read_type_owned(maybe_file);
-            }
-        }
-
         let mut state = self.state.write().await;
 
         if state.is_deleted() {
@@ -256,13 +242,6 @@ impl<FE> FileLock<FE> {
         F: 'a,
         FE: FileLoad + AsType<F>,
     {
-        if let Ok(maybe_file) = self.file.try_write() {
-            if maybe_file.is_some() {
-                self.cache.bump(&self.path, None);
-                return write_type(maybe_file);
-            }
-        }
-
         let mut state = self.state.write().await;
 
         if state.is_deleted() {
@@ -314,13 +293,6 @@ impl<FE> FileLock<FE> {
     where
         FE: FileLoad + AsType<F>,
     {
-        if let Ok(maybe_file) = self.file.clone().try_write_owned() {
-            if maybe_file.is_some() {
-                self.cache.bump(&self.path, None);
-                return write_type_owned(maybe_file);
-            }
-        }
-
         let mut state = self.state.write().await;
 
         if state.is_deleted() {
