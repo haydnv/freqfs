@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::io;
-use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,7 +10,7 @@ use futures::future::Future;
 use log::warn;
 use safecast::AsType;
 use tokio::fs;
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use uuid::Uuid;
 
 use crate::cache::Cache;
@@ -526,32 +525,62 @@ impl<FE: FileLoad> DirLock<FE> {
 
     /// Lock this directory for reading.
     pub async fn read(&self) -> DirReadGuard<FE> {
-        let guard = self.state.clone().read_owned().await;
-        DirReadGuard { guard }
+        self.state.read().await
     }
 
     /// Lock this directory for reading synchronously, if possible.
     pub fn try_read(&self) -> Result<DirReadGuard<FE>, io::Error> {
         self.state
+            .try_read()
+            .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
+    }
+
+    /// Lock this directory for reading.
+    pub async fn read_owned(&self) -> DirReadGuardOwned<FE> {
+        self.state.clone().read_owned().await
+    }
+
+    /// Lock this directory for reading synchronously, if possible.
+    pub fn try_read_owned(&self) -> Result<DirReadGuardOwned<FE>, io::Error> {
+        self.state
             .clone()
             .try_read_owned()
-            .map(|guard| DirReadGuard { guard })
             .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
+    }
+
+    /// Lock this directory for reading, without borrowing.
+    pub async fn into_read(self) -> DirReadGuardOwned<FE> {
+        self.state.read_owned().await
     }
 
     /// Lock this directory for writing.
     pub async fn write(&self) -> DirWriteGuard<FE> {
-        let guard = self.state.clone().write_owned().await;
-        DirWriteGuard { guard }
+        self.state.write().await
     }
 
     /// Lock this directory for writing synchronously, if possible.
     pub fn try_write(&self) -> Result<DirWriteGuard<FE>, io::Error> {
         self.state
+            .try_write()
+            .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
+    }
+
+    /// Lock this directory for writing.
+    pub async fn write_owned(&self) -> DirWriteGuardOwned<FE> {
+        self.state.clone().write_owned().await
+    }
+
+    /// Lock this directory for writing synchronously, if possible.
+    pub fn try_write_owned(&self) -> Result<DirWriteGuardOwned<FE>, io::Error> {
+        self.state
             .clone()
             .try_write_owned()
-            .map(|guard| DirWriteGuard { guard })
             .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
+    }
+
+    /// Lock this directory for writing, without borrowing.
+    pub async fn into_write(self) -> DirWriteGuardOwned<FE> {
+        self.state.write_owned().await
     }
 
     /// Synchronize the contents of this directory with the filesystem.
@@ -614,36 +643,16 @@ impl<FE: FileLoad> DirLock<FE> {
 }
 
 /// A read lock on a directory.
-pub struct DirReadGuard<FE> {
-    guard: OwnedRwLockReadGuard<Dir<FE>>,
-}
+pub type DirReadGuard<'a, FE> = RwLockReadGuard<'a, Dir<FE>>;
 
-impl<FE> Deref for DirReadGuard<FE> {
-    type Target = Dir<FE>;
-
-    fn deref(&self) -> &Self::Target {
-        self.guard.deref()
-    }
-}
+/// An owned read lock on a directory.
+pub type DirReadGuardOwned<FE> = OwnedRwLockReadGuard<Dir<FE>>;
 
 /// A write lock on a directory.
-pub struct DirWriteGuard<FE> {
-    guard: OwnedRwLockWriteGuard<Dir<FE>>,
-}
+pub type DirWriteGuard<'a, FE> = RwLockWriteGuard<'a, Dir<FE>>;
 
-impl<FE> Deref for DirWriteGuard<FE> {
-    type Target = Dir<FE>;
-
-    fn deref(&self) -> &Self::Target {
-        self.guard.deref()
-    }
-}
-
-impl<FE> DerefMut for DirWriteGuard<FE> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.guard.deref_mut()
-    }
-}
+/// An owned write lock on a directory.
+pub type DirWriteGuardOwned<FE> = OwnedRwLockWriteGuard<Dir<FE>>;
 
 async fn delete_dir(path: &Path) -> Result<(), io::Error> {
     match fs::remove_dir_all(path).await {
