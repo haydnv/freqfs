@@ -15,7 +15,9 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use uuid::Uuid;
 
 use crate::cache::Cache;
-use crate::file::{FileLoad, FileLock, FileReadGuardOwned, FileWriteGuardOwned};
+use crate::file::{
+    FileLoad, FileLock, FileReadGuard, FileReadGuardOwned, FileWriteGuard, FileWriteGuardOwned,
+};
 
 /// A type that can be used to look up a directory entry without calling `to_string()`,
 /// to avoid unnecessary heap allocations.
@@ -180,12 +182,12 @@ impl<FE: FileLoad> Dir<FE> {
     /// Get the file with the given `name` from this [`Dir`], if present.
     ///
     /// Also returns `None` if the entry at `name` is a directory.
-    pub fn get_file<Q: Name + ?Sized>(&self, name: &Q) -> Option<FileLock<FE>> {
+    pub fn get_file<Q: Name + ?Sized>(&self, name: &Q) -> Option<&FileLock<FE>> {
         if self.deleted.bisect(partial_cmp(name)).is_some() {
             None
         } else {
             match self.contents.bisect(partial_cmp(name)) {
-                Some(DirEntry::File(file_lock)) => Some(file_lock.clone()),
+                Some(DirEntry::File(file_lock)) => Some(file_lock),
                 _ => None,
             }
         }
@@ -221,7 +223,25 @@ impl<FE: FileLoad> Dir<FE> {
 
     /// Convenience method to lock a file for reading.
     /// Returns a "not found" error if the there is no file with the given `name`.
-    pub async fn read_file_owned<Q, F>(&self, name: &Q) -> Result<FileReadGuardOwned<FE, F>, io::Error>
+    pub async fn read_file<'a, Q, F>(&'a self, name: &Q) -> Result<FileReadGuard<'a, F>, io::Error>
+    where
+        F: 'a,
+        Q: Name + fmt::Display + ?Sized,
+        FE: FileLoad + AsType<F>,
+    {
+        if let Some(file) = self.get_file(name) {
+            file.read().await
+        } else {
+            Err(io::Error::new(io::ErrorKind::NotFound, name.to_string()))
+        }
+    }
+
+    /// Convenience method to lock a file for reading.
+    /// Returns a "not found" error if the there is no file with the given `name`.
+    pub async fn read_file_owned<Q, F>(
+        &self,
+        name: &Q,
+    ) -> Result<FileReadGuardOwned<FE, F>, io::Error>
     where
         Q: Name + fmt::Display + ?Sized,
         FE: FileLoad + AsType<F>,
@@ -235,7 +255,28 @@ impl<FE: FileLoad> Dir<FE> {
 
     /// Convenience method to lock a file for writing.
     /// Returns a "not found" error if the there is no file with the given `name`.
-    pub async fn write_file_owned<Q, F>(&self, name: &Q) -> Result<FileWriteGuardOwned<FE, F>, io::Error>
+    pub async fn write_file<'a, Q, F>(
+        &'a self,
+        name: &Q,
+    ) -> Result<FileWriteGuard<'a, F>, io::Error>
+    where
+        F: 'a,
+        Q: Name + fmt::Display + ?Sized,
+        FE: FileLoad + AsType<F>,
+    {
+        if let Some(file) = self.get_file(name) {
+            file.write().await
+        } else {
+            Err(io::Error::new(io::ErrorKind::NotFound, name.to_string()))
+        }
+    }
+
+    /// Convenience method to lock a file for writing.
+    /// Returns a "not found" error if the there is no file with the given `name`.
+    pub async fn write_file_owned<Q, F>(
+        &self,
+        name: &Q,
+    ) -> Result<FileWriteGuardOwned<FE, F>, io::Error>
     where
         Q: Name + fmt::Display + ?Sized,
         FE: FileLoad + AsType<F>,

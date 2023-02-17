@@ -128,10 +128,7 @@ impl<FE> FileLock<FE> {
         let mut state = self.state.write().await;
 
         if state.is_deleted() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "this file has been deleted",
-            ));
+            return Err(deleted());
         }
 
         let guard = if state.is_pending() {
@@ -161,10 +158,7 @@ impl<FE> FileLock<FE> {
 
         match &*state {
             FileLockState::Pending => Err(would_block("this file is not in the cache")),
-            FileLockState::Deleted(_sync) => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "this file has been deleted",
-            )),
+            FileLockState::Deleted(_sync) => Err(deleted()),
             FileLockState::Read(_size) | FileLockState::Modified(_size) => {
                 self.cache.bump(&self.path, None);
                 let guard = self.file.try_read().map_err(would_block)?;
@@ -188,10 +182,7 @@ impl<FE> FileLock<FE> {
         let mut state = self.state.write().await;
 
         if state.is_deleted() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "this file has been deleted",
-            ));
+            return Err(deleted());
         }
 
         let guard = if state.is_pending() {
@@ -221,16 +212,42 @@ impl<FE> FileLock<FE> {
 
         match &*state {
             FileLockState::Pending => Err(would_block("this file is not in the cache")),
-            FileLockState::Deleted(_sync) => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "this file has been deleted",
-            )),
+            FileLockState::Deleted(_sync) => Err(deleted()),
             FileLockState::Read(_size) | FileLockState::Modified(_size) => {
                 self.cache.bump(&self.path, None);
                 let guard = self.file.clone().try_read_owned().map_err(would_block)?;
                 read_type_owned(guard)
             }
         }
+    }
+
+    /// Lock this file for reading, without borrowing.
+    pub async fn into_read<F>(self) -> Result<FileReadGuardOwned<FE, F>, io::Error>
+    where
+        FE: FileLoad + AsType<F>,
+    {
+        let mut state = self.state.write().await;
+
+        if state.is_deleted() {
+            return Err(deleted());
+        }
+
+        let guard = if state.is_pending() {
+            let mut contents = self.file.try_write_owned().expect("file contents");
+            let (size, entry) = load(&**self.path).await?;
+
+            self.cache.bump(&self.path, Some(size));
+
+            *state = FileLockState::Read(size);
+            *contents = Some(entry);
+
+            contents.downgrade()
+        } else {
+            self.cache.bump(&self.path, None);
+            self.file.read_owned().await
+        };
+
+        read_type_owned(guard)
     }
 
     /// Lock this file for writing.
@@ -249,10 +266,7 @@ impl<FE> FileLock<FE> {
         let mut state = self.state.write().await;
 
         if state.is_deleted() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "this file has been deleted",
-            ));
+            return Err(deleted());
         }
 
         let guard = if state.is_pending() {
@@ -286,10 +300,7 @@ impl<FE> FileLock<FE> {
         if state.is_pending() {
             Err(would_block("this file is not in the cache"))
         } else if state.is_deleted() {
-            Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "this file has been deleted",
-            ))
+            Err(deleted())
         } else {
             state.upgrade();
             self.cache.bump(&self.path, None);
@@ -313,10 +324,7 @@ impl<FE> FileLock<FE> {
         let mut state = self.state.write().await;
 
         if state.is_deleted() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "this file has been deleted",
-            ));
+            return Err(deleted());
         }
 
         let guard = if state.is_pending() {
@@ -347,16 +355,42 @@ impl<FE> FileLock<FE> {
         if state.is_pending() {
             Err(would_block("this file is not in the cache"))
         } else if state.is_deleted() {
-            Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "this file has been deleted",
-            ))
+            Err(deleted())
         } else {
             state.upgrade();
             self.cache.bump(&self.path, None);
             let guard = self.file.clone().try_write_owned().map_err(would_block)?;
             write_type_owned(guard)
         }
+    }
+
+    /// Lock this file for writing, without borrowing.
+    pub async fn into_write<F>(self) -> Result<FileWriteGuardOwned<FE, F>, io::Error>
+    where
+        FE: FileLoad + AsType<F>,
+    {
+        let mut state = self.state.write().await;
+
+        if state.is_deleted() {
+            return Err(deleted());
+        }
+
+        let guard = if state.is_pending() {
+            let mut contents = self.file.try_write_owned().expect("file contents");
+            let (size, entry) = load(&**self.path).await?;
+            self.cache.bump(&self.path, Some(size));
+
+            *state = FileLockState::Modified(size);
+            *contents = Some(entry);
+
+            contents
+        } else {
+            state.upgrade();
+            self.cache.bump(&self.path, None);
+            self.file.write_owned().await
+        };
+
+        write_type_owned(guard)
     }
 
     /// Back up this file's contents to the filesystem.
@@ -659,6 +693,11 @@ async fn delete_file(path: &Path) -> Result<(), io::Error> {
         }
         Err(cause) => Err(cause),
     }
+}
+
+#[inline]
+fn deleted() -> io::Error {
+    io::Error::new(io::ErrorKind::NotFound, "this file has been deleted")
 }
 
 #[inline]
