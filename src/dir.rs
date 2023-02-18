@@ -18,6 +18,18 @@ use crate::file::{
     FileLoad, FileLock, FileReadGuard, FileReadGuardOwned, FileWriteGuard, FileWriteGuardOwned,
 };
 
+/// A read lock on a directory.
+pub type DirReadGuard<'a, FE> = RwLockReadGuard<'a, Dir<FE>>;
+
+/// An owned read lock on a directory.
+pub type DirReadGuardOwned<FE> = OwnedRwLockReadGuard<Dir<FE>>;
+
+/// A write lock on a directory.
+pub type DirWriteGuard<'a, FE> = RwLockWriteGuard<'a, Dir<FE>>;
+
+/// An owned write lock on a directory.
+pub type DirWriteGuardOwned<FE> = OwnedRwLockWriteGuard<Dir<FE>>;
+
 /// A type that can be used to look up a directory entry without calling `to_string()`,
 /// to avoid unnecessary heap allocations.
 pub trait Name {
@@ -641,18 +653,6 @@ impl<FE: FileLoad> DirLock<FE> {
         })
     }
 }
-
-/// A read lock on a directory.
-pub type DirReadGuard<'a, FE> = RwLockReadGuard<'a, Dir<FE>>;
-
-/// An owned read lock on a directory.
-pub type DirReadGuardOwned<FE> = OwnedRwLockReadGuard<Dir<FE>>;
-
-/// A write lock on a directory.
-pub type DirWriteGuard<'a, FE> = RwLockWriteGuard<'a, Dir<FE>>;
-
-/// An owned write lock on a directory.
-pub type DirWriteGuardOwned<FE> = OwnedRwLockWriteGuard<Dir<FE>>;
 
 async fn delete_dir(path: &Path) -> Result<(), io::Error> {
     match fs::remove_dir_all(path).await {
