@@ -25,7 +25,9 @@ mod dir;
 mod file;
 
 pub use cache::Cache;
-pub use dir::{Dir, DirEntry, DirLock, DirReadGuard, DirReadGuardOwned, DirWriteGuard, DirWriteGuardOwned};
+pub use dir::{
+    Dir, DirEntry, DirLock, DirReadGuard, DirReadGuardOwned, DirWriteGuard, DirWriteGuardOwned,
+};
 pub use file::{
     FileLoad, FileLock, FileReadGuard, FileReadGuardOwned, FileWriteGuard, FileWriteGuardOwned,
 };

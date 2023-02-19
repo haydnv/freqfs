@@ -159,7 +159,7 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
 
         let mut over = state.size as i64 - self.capacity as i64;
 
-        for (_path, file) in state.files.iter() {
+        for (_path, file) in state.files.iter().rev() {
             if let Some((size, eviction)) = file.clone().evict() {
                 over -= size as i64;
                 evictions.push(eviction);

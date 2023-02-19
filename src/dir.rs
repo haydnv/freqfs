@@ -10,7 +10,9 @@ use futures::future::Future;
 use log::warn;
 use safecast::AsType;
 use tokio::fs;
-use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::sync::{
+    OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
+};
 use uuid::Uuid;
 
 use crate::cache::Cache;
