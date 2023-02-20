@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, mem};
 
-use ds_ext::{OrdHashMap, OrdHashSet};
+use ds_ext::OrdHashMap;
 use futures::future::Future;
 use log::warn;
 use safecast::AsType;
@@ -105,7 +105,7 @@ pub struct Dir<FE> {
     path: PathBuf,
     cache: Arc<Cache<FE>>,
     contents: OrdHashMap<String, DirEntry<FE>>,
-    deleted: OrdHashSet<String>,
+    deleted: OrdHashMap<String, DirEntry<FE>>,
 }
 
 impl<FE: FileLoad> Dir<FE> {
@@ -125,15 +125,13 @@ impl<FE: FileLoad> Dir<FE> {
 
     /// Create and return a new subdirectory of this [`Dir`].
     pub fn create_dir(&mut self, name: String) -> Result<DirLock<FE>, io::Error> {
-        if !self.deleted.remove(&name) {
-            if self.contents.contains_key(&name) {
-                warn!(
-                    "attempted to create a directory {} in {:?} that already exists",
-                    name, self.path
-                );
+        if self.deleted.remove(&name).is_some() {
+            warn!(
+                "attempted to create a directory {} in {:?} that already exists",
+                name, self.path
+            );
 
-                return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
-            }
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
         }
 
         let path = self.path.join(&name);
@@ -148,18 +146,16 @@ impl<FE: FileLoad> Dir<FE> {
     /// Return a new subdirectory of this [`Dir`], creating it if it doesn't already exist.
     pub fn get_or_create_dir(&mut self, name: String) -> Result<DirLock<FE>, io::Error> {
         // if the requested dir hasn't been deleted
-        if !self.deleted.remove(&name) {
+        if let Some(entry) = self.deleted.remove(&name) {
             // and it already exists
-            if let Some(entry) = self.contents.get(&name) {
-                // return the existing dir
-                return match entry {
-                    DirEntry::Dir(dir_lock) => Ok(dir_lock.clone()),
-                    DirEntry::File(file) => Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        format!("there is already a file at {}: {:?}", name, file),
-                    )),
-                };
-            }
+            // then return the existing dir
+            return match entry {
+                DirEntry::Dir(dir_lock) => Ok(dir_lock.clone()),
+                DirEntry::File(file) => Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("there is already a file at {}: {:?}", name, file),
+                )),
+            };
         }
 
         let path = self.path.join(&name);
@@ -208,30 +204,17 @@ impl<FE: FileLoad> Dir<FE> {
 
     /// Return `true` if this [`Dir`] contains no entries.
     pub fn is_empty(&self) -> bool {
-        if self.contents.is_empty() {
-            true
-        } else {
-            self.contents
-                .keys()
-                .filter(|name| !self.deleted.contains(*name))
-                .next()
-                .is_none()
-        }
+        self.contents.is_empty()
     }
 
     /// Return an [`Iterator`] over the entries in this [`Dir`].
     pub fn iter(&self) -> impl Iterator<Item = (&String, &DirEntry<FE>)> {
-        self.contents
-            .iter()
-            .filter(move |(name, _)| !self.deleted.contains(*name))
+        self.contents.iter()
     }
 
     /// Return the number of entries in this [`Dir`].
     pub fn len(&self) -> usize {
-        self.contents
-            .keys()
-            .filter(|name| !self.deleted.contains(*name))
-            .count()
+        self.contents.len()
     }
 
     /// Convenience method to lock a file for reading.
@@ -313,15 +296,13 @@ impl<FE: FileLoad> Dir<FE> {
     where
         FE: From<F>,
     {
-        if !self.deleted.remove(&name) {
-            if self.contents.contains_key(&name) {
-                warn!(
-                    "attempted to create a file {} in {:?} that already exists",
-                    name, self.path
-                );
+        if self.deleted.remove(&name).is_some() {
+            warn!(
+                "attempted to create a file {} in {:?} that already exists",
+                name, self.path
+            );
 
-                return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
-            }
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
         }
 
         let path = self.path.join(&name);
@@ -361,15 +342,21 @@ impl<FE: FileLoad> Dir<FE> {
     /// Make sure to call `sync` to delete any contents on the filesystem if it's possible for
     /// an new entry with the same name to be created later.
     /// Alternately, call `Dir::delete_and_sync`.
-    pub fn delete(&mut self, name: String) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+    pub fn delete<'a, Q>(
+        &'a mut self,
+        name: &'a Q,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>
+    where
+        Q: Name + Send + Sync + ?Sized,
+    {
         Box::pin(async move {
-            if let Some(entry) = self.contents.get(&name) {
-                self.deleted.insert(name);
-
-                match entry {
+            if let Some((name, entry)) = self.contents.bisect_and_remove(partial_cmp(name)) {
+                match &entry {
                     DirEntry::Dir(dir) => dir.delete_self().await,
                     DirEntry::File(file) => file.delete(true).await,
                 }
+
+                self.deleted.insert(name, entry);
 
                 true
             } else {
@@ -405,11 +392,10 @@ impl<FE: FileLoad> Dir<FE> {
     /// but will NOT synchronize the contents of any child directories or files.
     pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + '_>> {
         Box::pin(async move {
-            let mut deleted = OrdHashSet::new();
+            let mut deleted = OrdHashMap::new();
             mem::swap(&mut deleted, &mut self.deleted);
 
-            for name in deleted {
-                let entry = self.contents.remove(&name).expect("deleted dir entry");
+            for (_name, entry) in deleted {
                 match entry {
                     DirEntry::Dir(subdir) => {
                         let subdir = subdir.write().await;
@@ -432,13 +418,13 @@ impl<FE: FileLoad> Dir<FE> {
 
     fn delete_self(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            for (name, entry) in self.contents.iter() {
-                self.deleted.insert(name.clone());
-
-                match entry {
+            for (name, entry) in self.contents.drain() {
+                match &entry {
                     DirEntry::Dir(dir) => dir.delete_self().await,
                     DirEntry::File(file) => file.delete(false).await,
                 }
+
+                self.deleted.insert(name.clone(), entry);
             }
         })
     }
@@ -491,7 +477,7 @@ impl<FE: FileLoad> DirLock<FE> {
             path,
             cache,
             contents: OrdHashMap::new(),
-            deleted: OrdHashSet::new(),
+            deleted: OrdHashMap::new(),
         };
 
         Self {
@@ -530,7 +516,7 @@ impl<FE: FileLoad> DirLock<FE> {
             path,
             cache,
             contents,
-            deleted: OrdHashSet::new(),
+            deleted: OrdHashMap::new(),
         };
 
         let inner = Arc::new(RwLock::new(dir));
@@ -630,7 +616,7 @@ impl<FE: FileLoad> DirLock<FE> {
 
             for (name, size) in sizes {
                 if size == 0 {
-                    entries.delete(name).await;
+                    entries.delete(&name).await;
                 }
             }
 

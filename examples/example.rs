@@ -202,9 +202,9 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
     // now it's safe to delete the entries whose locks have been dropped
 
     // deleting is a synchronous operation operation since it happens in-memory only
-    assert!(root.delete("hello.txt".to_string()).await);
+    assert!(root.delete("hello.txt").await);
     assert!(root.get("hello.txt").is_none());
-    assert!(root.delete("subdir".to_string()).await);
+    assert!(root.delete("subdir").await);
     assert!(root.get("subdir").is_none());
 
     // but we can explicitly sync to delete the file on the filesystem
