@@ -98,6 +98,11 @@ impl<FE> FileLock<FE> {
         }
     }
 
+    /// Borrow the [`Path`] of this [`FileLock`].
+    pub fn path(&self) -> &Path {
+        self.path.as_path()
+    }
+
     /// Load a new [`FileLock`].
     pub fn load<F>(cache: Arc<Cache<FE>>, path: PathBuf) -> Self
     where
