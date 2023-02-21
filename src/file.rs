@@ -14,6 +14,7 @@ use tokio::sync::{
 };
 
 use super::cache::Cache;
+use super::Result;
 
 pub type FileReadGuard<'a, F> = RwLockReadGuard<'a, F>;
 pub type FileReadGuardOwned<FE, F> = OwnedRwLockReadGuard<Option<FE>, F>;
@@ -22,16 +23,14 @@ pub type FileWriteGuardOwned<FE, F> = OwnedRwLockMappedWriteGuard<Option<FE>, F>
 
 const TMP: &'static str = "_freqfs";
 
-/// Load & save methods for a file data container type.
+/// Persistence methods for a file-backed data structure.
 #[async_trait]
 pub trait FileLoad: Send + Sync + Sized + 'static {
-    async fn load(
-        path: &Path,
-        file: fs::File,
-        metadata: std::fs::Metadata,
-    ) -> Result<Self, io::Error>;
+    /// Load this state from the given `file`.
+    async fn load(path: &Path, file: fs::File, metadata: std::fs::Metadata) -> Result<Self>;
 
-    async fn save(&self, file: &mut fs::File) -> Result<u64, io::Error>;
+    /// Save this state to the given `file`.
+    async fn save(&self, file: &mut fs::File) -> Result<u64>;
 }
 
 #[derive(Copy, Clone)]
@@ -113,7 +112,7 @@ impl<FE> FileLock<FE> {
     }
 
     /// Lock this file for reading.
-    pub async fn read<'a, F>(&'a self) -> Result<FileReadGuard<'a, F>, io::Error>
+    pub async fn read<'a, F>(&'a self) -> Result<FileReadGuard<'a, F>>
     where
         F: 'a,
         FE: FileLoad + AsType<F>,
@@ -143,7 +142,7 @@ impl<FE> FileLock<FE> {
     }
 
     /// Lock this file for reading synchronously if possible, otherwise return an error.
-    pub fn try_read<F>(&self) -> Result<FileReadGuard<F>, io::Error>
+    pub fn try_read<F>(&self) -> Result<FileReadGuard<F>>
     where
         FE: FileLoad + AsType<F>,
     {
@@ -161,7 +160,7 @@ impl<FE> FileLock<FE> {
     }
 
     /// Lock this file for reading.
-    pub async fn read_owned<F>(&self) -> Result<FileReadGuardOwned<FE, F>, io::Error>
+    pub async fn read_owned<F>(&self) -> Result<FileReadGuardOwned<FE, F>>
     where
         FE: FileLoad + AsType<F>,
     {
@@ -190,7 +189,7 @@ impl<FE> FileLock<FE> {
     }
 
     /// Lock this file for reading synchronously if possible, otherwise return an error.
-    pub fn try_read_owned<F>(&self) -> Result<FileReadGuardOwned<FE, F>, io::Error>
+    pub fn try_read_owned<F>(&self) -> Result<FileReadGuardOwned<FE, F>>
     where
         FE: FileLoad + AsType<F>,
     {
@@ -208,7 +207,7 @@ impl<FE> FileLock<FE> {
     }
 
     /// Lock this file for reading, without borrowing.
-    pub async fn into_read<F>(self) -> Result<FileReadGuardOwned<FE, F>, io::Error>
+    pub async fn into_read<F>(self) -> Result<FileReadGuardOwned<FE, F>>
     where
         FE: FileLoad + AsType<F>,
     {
@@ -237,7 +236,7 @@ impl<FE> FileLock<FE> {
     }
 
     /// Lock this file for writing.
-    pub async fn write<'a, F>(&'a self) -> Result<FileWriteGuard<'a, F>, io::Error>
+    pub async fn write<'a, F>(&'a self) -> Result<FileWriteGuard<'a, F>>
     where
         F: 'a,
         FE: FileLoad + AsType<F>,
@@ -270,7 +269,7 @@ impl<FE> FileLock<FE> {
     }
 
     /// Lock this file for writing synchronously if possible, otherwise return an error.
-    pub fn try_write<F>(&self) -> Result<FileWriteGuard<F>, io::Error>
+    pub fn try_write<F>(&self) -> Result<FileWriteGuard<F>>
     where
         FE: FileLoad + AsType<F>,
     {
@@ -289,7 +288,7 @@ impl<FE> FileLock<FE> {
     }
 
     /// Lock this file for writing.
-    pub async fn write_owned<F>(&self) -> Result<FileWriteGuardOwned<FE, F>, io::Error>
+    pub async fn write_owned<F>(&self) -> Result<FileWriteGuardOwned<FE, F>>
     where
         FE: FileLoad + AsType<F>,
     {
@@ -318,7 +317,7 @@ impl<FE> FileLock<FE> {
     }
 
     /// Lock this file for writing synchronously if possible, otherwise return an error.
-    pub fn try_write_owned<F>(&self) -> Result<FileWriteGuardOwned<FE, F>, io::Error>
+    pub fn try_write_owned<F>(&self) -> Result<FileWriteGuardOwned<FE, F>>
     where
         FE: FileLoad + AsType<F>,
     {
@@ -337,7 +336,7 @@ impl<FE> FileLock<FE> {
     }
 
     /// Lock this file for writing, without borrowing.
-    pub async fn into_write<F>(self) -> Result<FileWriteGuardOwned<FE, F>, io::Error>
+    pub async fn into_write<F>(self) -> Result<FileWriteGuardOwned<FE, F>>
     where
         FE: FileLoad + AsType<F>,
     {
@@ -366,7 +365,7 @@ impl<FE> FileLock<FE> {
     }
 
     /// Back up this file's contents to the filesystem.
-    pub async fn sync(&self) -> Result<(), io::Error>
+    pub async fn sync(&self) -> Result<()>
     where
         FE: FileLoad,
     {
@@ -415,7 +414,7 @@ impl<FE> FileLock<FE> {
         *file_state = FileLockState::Deleted(file_only);
     }
 
-    pub(crate) async fn delete_and_sync(self) -> Result<(), io::Error> {
+    pub(crate) async fn delete_and_sync(self) -> Result<()> {
         let file_state = self.state.write().await;
 
         let size = match &*file_state {
@@ -434,7 +433,7 @@ impl<FE> FileLock<FE> {
         }
     }
 
-    pub(crate) fn evict(self) -> Option<(usize, impl Future<Output = Result<(), io::Error>>)>
+    pub(crate) fn evict(self) -> Option<(usize, impl Future<Output = Result<()>>)>
     where
         FE: FileLoad + 'static,
     {
@@ -485,7 +484,7 @@ impl<FE> fmt::Debug for FileLock<FE> {
     }
 }
 
-async fn load<FE: FileLoad>(path: &Path) -> Result<(usize, FE), io::Error> {
+async fn load<FE: FileLoad>(path: &Path) -> Result<(usize, FE)> {
     let file = fs::File::open(path).await?;
     let metadata = file.metadata().await?;
     let size = match metadata.len().try_into() {
@@ -503,7 +502,7 @@ async fn load<FE: FileLoad>(path: &Path) -> Result<(usize, FE), io::Error> {
     Ok((size, entry))
 }
 
-async fn persist<FE: FileLoad>(path: &Path, file: &FE) -> Result<u64, io::Error> {
+async fn persist<FE: FileLoad>(path: &Path, file: &FE) -> Result<u64> {
     let tmp = if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
         path.with_extension(format!("{}_{}", ext, TMP))
     } else {
@@ -570,7 +569,7 @@ async fn persist<FE: FileLoad>(path: &Path, file: &FE) -> Result<u64, io::Error>
     Ok(size)
 }
 
-async fn create_dir(path: &Path) -> Result<(), io::Error> {
+async fn create_dir(path: &Path) -> Result<()> {
     if path.exists() {
         Ok(())
     } else {
@@ -591,7 +590,7 @@ async fn create_dir(path: &Path) -> Result<(), io::Error> {
 }
 
 #[inline]
-fn read_type<F, T>(maybe_file: RwLockReadGuard<Option<F>>) -> Result<RwLockReadGuard<T>, io::Error>
+fn read_type<F, T>(maybe_file: RwLockReadGuard<Option<F>>) -> Result<RwLockReadGuard<T>>
 where
     F: AsType<T>,
 {
@@ -607,7 +606,7 @@ where
 #[inline]
 fn read_type_owned<F, T>(
     maybe_file: OwnedRwLockReadGuard<Option<F>>,
-) -> Result<OwnedRwLockReadGuard<Option<F>, T>, io::Error>
+) -> Result<OwnedRwLockReadGuard<Option<F>, T>>
 where
     F: AsType<T>,
 {
@@ -621,9 +620,7 @@ where
 }
 
 #[inline]
-fn write_type<F, T>(
-    maybe_file: RwLockWriteGuard<Option<F>>,
-) -> Result<RwLockMappedWriteGuard<T>, io::Error>
+fn write_type<F, T>(maybe_file: RwLockWriteGuard<Option<F>>) -> Result<RwLockMappedWriteGuard<T>>
 where
     F: AsType<T>,
 {
@@ -641,7 +638,7 @@ where
 #[inline]
 fn write_type_owned<F, T>(
     maybe_file: OwnedRwLockWriteGuard<Option<F>>,
-) -> Result<OwnedRwLockMappedWriteGuard<Option<F>, T>, io::Error>
+) -> Result<OwnedRwLockMappedWriteGuard<Option<F>, T>>
 where
     F: AsType<T>,
 {
@@ -656,7 +653,7 @@ where
     }
 }
 
-async fn delete_file(path: &Path) -> Result<(), io::Error> {
+async fn delete_file(path: &Path) -> Result<()> {
     match fs::remove_file(path).await {
         Ok(()) => Ok(()),
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => {

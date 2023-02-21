@@ -15,10 +15,9 @@ use tokio::sync::{
 };
 use uuid::Uuid;
 
-use crate::cache::Cache;
-use crate::file::{
-    FileLoad, FileLock, FileReadGuard, FileReadGuardOwned, FileWriteGuard, FileWriteGuardOwned,
-};
+use super::cache::Cache;
+use super::file::*;
+use super::Result;
 
 /// A read lock on a directory.
 pub type DirReadGuard<'a, FE> = RwLockReadGuard<'a, Dir<FE>>;
@@ -124,7 +123,7 @@ impl<FE: FileLoad> Dir<FE> {
     }
 
     /// Create and return a new subdirectory of this [`Dir`].
-    pub fn create_dir(&mut self, name: String) -> Result<DirLock<FE>, io::Error> {
+    pub fn create_dir(&mut self, name: String) -> Result<DirLock<FE>> {
         if self.deleted.remove(&name).is_some() {
             warn!(
                 "attempted to create a directory {} in {:?} that already exists",
@@ -144,7 +143,7 @@ impl<FE: FileLoad> Dir<FE> {
     }
 
     /// Return a new subdirectory of this [`Dir`], creating it if it doesn't already exist.
-    pub fn get_or_create_dir(&mut self, name: String) -> Result<DirLock<FE>, io::Error> {
+    pub fn get_or_create_dir(&mut self, name: String) -> Result<DirLock<FE>> {
         // if the requested dir hasn't been deleted
         if let Some(entry) = self.deleted.remove(&name) {
             // and it already exists
@@ -219,7 +218,7 @@ impl<FE: FileLoad> Dir<FE> {
 
     /// Convenience method to lock a file for reading.
     /// Returns a "not found" error if the there is no file with the given `name`.
-    pub async fn read_file<'a, Q, F>(&'a self, name: &Q) -> Result<FileReadGuard<'a, F>, io::Error>
+    pub async fn read_file<'a, Q, F>(&'a self, name: &Q) -> Result<FileReadGuard<'a, F>>
     where
         F: 'a,
         Q: Name + fmt::Display + ?Sized,
@@ -234,10 +233,7 @@ impl<FE: FileLoad> Dir<FE> {
 
     /// Convenience method to lock a file for reading.
     /// Returns a "not found" error if the there is no file with the given `name`.
-    pub async fn read_file_owned<Q, F>(
-        &self,
-        name: &Q,
-    ) -> Result<FileReadGuardOwned<FE, F>, io::Error>
+    pub async fn read_file_owned<Q, F>(&self, name: &Q) -> Result<FileReadGuardOwned<FE, F>>
     where
         Q: Name + fmt::Display + ?Sized,
         FE: FileLoad + AsType<F>,
@@ -251,10 +247,7 @@ impl<FE: FileLoad> Dir<FE> {
 
     /// Convenience method to lock a file for writing.
     /// Returns a "not found" error if the there is no file with the given `name`.
-    pub async fn write_file<'a, Q, F>(
-        &'a self,
-        name: &Q,
-    ) -> Result<FileWriteGuard<'a, F>, io::Error>
+    pub async fn write_file<'a, Q, F>(&'a self, name: &Q) -> Result<FileWriteGuard<'a, F>>
     where
         F: 'a,
         Q: Name + fmt::Display + ?Sized,
@@ -269,10 +262,7 @@ impl<FE: FileLoad> Dir<FE> {
 
     /// Convenience method to lock a file for writing.
     /// Returns a "not found" error if the there is no file with the given `name`.
-    pub async fn write_file_owned<Q, F>(
-        &self,
-        name: &Q,
-    ) -> Result<FileWriteGuardOwned<FE, F>, io::Error>
+    pub async fn write_file_owned<Q, F>(&self, name: &Q) -> Result<FileWriteGuardOwned<FE, F>>
     where
         Q: Name + fmt::Display + ?Sized,
         FE: FileLoad + AsType<F>,
@@ -287,12 +277,7 @@ impl<FE: FileLoad> Dir<FE> {
 
 impl<FE: FileLoad> Dir<FE> {
     /// Create a new file in this [`Dir`] with the given `contents`.
-    pub fn create_file<F>(
-        &mut self,
-        name: String,
-        contents: F,
-        size: usize,
-    ) -> Result<FileLock<FE>, io::Error>
+    pub fn create_file<F>(&mut self, name: String, contents: F, size: usize) -> Result<FileLock<FE>>
     where
         FE: From<F>,
     {
@@ -318,7 +303,7 @@ impl<FE: FileLoad> Dir<FE> {
         &mut self,
         contents: F,
         size: usize,
-    ) -> Result<(Uuid, FileLock<FE>), io::Error>
+    ) -> Result<(Uuid, FileLock<FE>)>
     where
         FE: From<F>,
     {
@@ -371,7 +356,7 @@ impl<FE: FileLoad> Dir<FE> {
     pub fn delete_and_sync(
         &mut self,
         name: String,
-    ) -> Pin<Box<dyn Future<Output = Result<bool, io::Error>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + '_>> {
         Box::pin(async move {
             if let Some(entry) = self.contents.remove(&name) {
                 match entry {
@@ -390,7 +375,7 @@ impl<FE: FileLoad> Dir<FE> {
     ///
     /// This will create new subdirectories and delete entries from the filesystem,
     /// but will NOT synchronize the contents of any child directories or files.
-    pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + '_>> {
+    pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
             let mut deleted = OrdHashMap::new();
             mem::swap(&mut deleted, &mut self.deleted);
@@ -432,7 +417,7 @@ impl<FE: FileLoad> Dir<FE> {
     fn delete_and_sync_self(
         &mut self,
         is_child: bool,
-    ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
             for (_name, entry) in self.contents.drain() {
                 match entry {
@@ -486,7 +471,7 @@ impl<FE: FileLoad> DirLock<FE> {
     }
 
     // This doesn't need to be async since it's only called at initialization time
-    pub(crate) fn load<'a>(cache: Arc<Cache<FE>>, path: PathBuf) -> Result<Self, io::Error> {
+    pub(crate) fn load<'a>(cache: Arc<Cache<FE>>, path: PathBuf) -> Result<Self> {
         let mut contents = OrdHashMap::new();
         let mut handles = std::fs::read_dir(&path)?;
 
@@ -529,7 +514,7 @@ impl<FE: FileLoad> DirLock<FE> {
     }
 
     /// Lock this directory for reading synchronously, if possible.
-    pub fn try_read(&self) -> Result<DirReadGuard<FE>, io::Error> {
+    pub fn try_read(&self) -> Result<DirReadGuard<FE>> {
         self.state
             .try_read()
             .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
@@ -541,7 +526,7 @@ impl<FE: FileLoad> DirLock<FE> {
     }
 
     /// Lock this directory for reading synchronously, if possible.
-    pub fn try_read_owned(&self) -> Result<DirReadGuardOwned<FE>, io::Error> {
+    pub fn try_read_owned(&self) -> Result<DirReadGuardOwned<FE>> {
         self.state
             .clone()
             .try_read_owned()
@@ -559,7 +544,7 @@ impl<FE: FileLoad> DirLock<FE> {
     }
 
     /// Lock this directory for writing synchronously, if possible.
-    pub fn try_write(&self) -> Result<DirWriteGuard<FE>, io::Error> {
+    pub fn try_write(&self) -> Result<DirWriteGuard<FE>> {
         self.state
             .try_write()
             .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
@@ -571,7 +556,7 @@ impl<FE: FileLoad> DirLock<FE> {
     }
 
     /// Lock this directory for writing synchronously, if possible.
-    pub fn try_write_owned(&self) -> Result<DirWriteGuardOwned<FE>, io::Error> {
+    pub fn try_write_owned(&self) -> Result<DirWriteGuardOwned<FE>> {
         self.state
             .clone()
             .try_write_owned()
@@ -587,7 +572,7 @@ impl<FE: FileLoad> DirLock<FE> {
     ///
     /// This will create new subdirectories and delete entries from the filesystem,
     /// but will NOT synchronize the contents of any child directories or files.
-    pub fn sync(&self) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + '_>> {
+    pub fn sync(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
             let mut dir = self.state.write().await;
             dir.sync().await
@@ -597,7 +582,7 @@ impl<FE: FileLoad> DirLock<FE> {
     /// Recursively delete empty entries in this [`Dir`].
     /// Returns the number of entries in this [`Dir`].
     /// Call this function immediately after loading the cache to avoid the risk of deadlock.
-    pub fn trim(&self) -> Pin<Box<dyn Future<Output = Result<usize, io::Error>> + '_>> {
+    pub fn trim(&self) -> Pin<Box<dyn Future<Output = Result<usize>> + '_>> {
         Box::pin(async move {
             let mut entries = self
                 .try_write()
@@ -634,7 +619,7 @@ impl<FE: FileLoad> DirLock<FE> {
     fn delete_and_sync_self(
         &self,
         is_child: bool,
-    ) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send + '_>> {
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
             let mut state = self.state.write().await;
             state.delete_and_sync_self(is_child).await
@@ -642,7 +627,7 @@ impl<FE: FileLoad> DirLock<FE> {
     }
 }
 
-async fn delete_dir(path: &Path) -> Result<(), io::Error> {
+async fn delete_dir(path: &Path) -> Result<()> {
     match fs::remove_dir_all(path).await {
         Ok(()) => Ok(()),
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(()),

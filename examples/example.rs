@@ -17,11 +17,7 @@ enum File {
 
 #[async_trait]
 impl FileLoad for File {
-    async fn load(
-        path: &Path,
-        mut file: fs::File,
-        metadata: std::fs::Metadata,
-    ) -> Result<Self, io::Error> {
+    async fn load(path: &Path, mut file: fs::File, metadata: std::fs::Metadata) -> Result<Self> {
         match path.extension() {
             Some(ext) if ext.to_str() == Some("bin") => {
                 let mut contents = Vec::with_capacity(metadata.len() as usize);
@@ -42,7 +38,7 @@ impl FileLoad for File {
         }
     }
 
-    async fn save(&self, file: &mut fs::File) -> Result<u64, io::Error> {
+    async fn save(&self, file: &mut fs::File) -> Result<u64> {
         match self {
             Self::Bin(bytes) => {
                 file.write_all(bytes).await?;
@@ -116,7 +112,7 @@ impl From<Vec<u8>> for File {
     }
 }
 
-async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
+async fn setup_tmp_dir() -> Result<PathBuf> {
     let mut rng = rand::thread_rng();
     loop {
         let rand: u32 = rng.gen();
@@ -139,7 +135,7 @@ async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
     }
 }
 
-async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
+async fn run_example(cache: DirLock<File>) -> Result<()> {
     let mut root = cache.write().await;
 
     assert_eq!(root.len(), 2);
@@ -218,7 +214,7 @@ async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), io::Error> {
+async fn main() -> Result<()> {
     let path = setup_tmp_dir().await?;
 
     // initialize the cache

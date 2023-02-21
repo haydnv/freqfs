@@ -9,6 +9,7 @@ use tokio::time::Duration;
 
 use super::dir::DirLock;
 use super::file::{FileLoad, FileLock};
+use super::Result;
 
 const GC_CYCLE_TIME: Duration = Duration::from_millis(10);
 const MAX_FILE_HANDLES: usize = 512;
@@ -129,7 +130,7 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
     ///
     /// After loading, all interactions with files under this directory should go through
     /// a [`DirLock`] or [`FileLock`].
-    pub fn load(self: Arc<Self>, path: PathBuf) -> Result<DirLock<FE>, io::Error> {
+    pub fn load(self: Arc<Self>, path: PathBuf) -> Result<DirLock<FE>> {
         {
             let state = self.lock();
             for (file_path, _) in state.files.iter() {
@@ -148,7 +149,7 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
         DirLock::load(self, path)
     }
 
-    fn gc(&self) -> FuturesUnordered<impl Future<Output = Result<(), io::Error>>> {
+    fn gc(&self) -> FuturesUnordered<impl Future<Output = Result<()>>> {
         let evictions = FuturesUnordered::new();
 
         let state = self.lock();

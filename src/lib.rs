@@ -24,6 +24,9 @@ mod cache;
 mod dir;
 mod file;
 
+/// The result of a filesystem operation using [`freqfs`]
+pub type Result<T> = std::result::Result<T, std::io::Error>;
+
 pub use cache::Cache;
 pub use dir::{
     Dir, DirEntry, DirLock, DirReadGuard, DirReadGuardOwned, DirWriteGuard, DirWriteGuardOwned,
