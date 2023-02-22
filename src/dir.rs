@@ -1,9 +1,8 @@
 use std::cmp::Ordering;
-use std::fmt;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::{fmt, io};
 
 use ds_ext::OrdHashMap;
 use futures::future::{self, Future};
@@ -47,6 +46,12 @@ impl Name for String {
 impl Name for str {
     fn partial_cmp(&self, key: &String) -> Option<Ordering> {
         PartialOrd::partial_cmp(self, key.as_str())
+    }
+}
+
+impl Name for Arc<String> {
+    fn partial_cmp(&self, key: &String) -> Option<Ordering> {
+        PartialOrd::partial_cmp(&**self, key)
     }
 }
 
@@ -624,6 +629,12 @@ impl<FE: FileLoad> DirLock<FE> {
             let mut state = self.state.write().await;
             state.truncate().await
         })
+    }
+}
+
+impl<FE> fmt::Debug for DirLock<FE> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("cached filesystem directory")
     }
 }
 

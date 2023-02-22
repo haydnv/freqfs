@@ -1,8 +1,7 @@
 use std::convert::TryInto;
-use std::fmt;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{fmt, io};
 
 use async_trait::async_trait;
 use futures::{Future, TryFutureExt};
