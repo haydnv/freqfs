@@ -235,5 +235,7 @@ async fn main() -> Result<()> {
     sub_dir_path.push("subdir");
     assert!(!sub_dir_path.exists());
 
-    fs::remove_dir(path).await
+    assert!(!path.exists());
+
+    Ok(())
 }

@@ -419,25 +419,6 @@ impl<FE> FileLock<FE> {
         *file_state = FileLockState::Deleted(file_only);
     }
 
-    pub(crate) async fn delete_and_sync(self) -> Result<()> {
-        let file_state = self.state.write().await;
-
-        let size = match &*file_state {
-            FileLockState::Pending => 0,
-            FileLockState::Read(size) => *size,
-            FileLockState::Modified(size) => *size,
-            FileLockState::Deleted(_) => 0,
-        };
-
-        self.cache.remove(&self.path, size);
-
-        if self.path.exists() {
-            delete_file(&self.path).await
-        } else {
-            Ok(())
-        }
-    }
-
     pub(crate) fn evict(self) -> Option<(usize, impl Future<Output = Result<()>>)>
     where
         FE: FileLoad + 'static,

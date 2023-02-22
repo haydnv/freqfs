@@ -1,12 +1,13 @@
 use std::cmp::Ordering;
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::{fmt, mem};
 
 use ds_ext::OrdHashMap;
-use futures::future::Future;
+use futures::future::{self, Future};
+use futures::stream::{FuturesUnordered, StreamExt};
 use log::warn;
 use safecast::AsType;
 use tokio::fs;
@@ -320,13 +321,12 @@ impl<FE: FileLoad> Dir<FE> {
     ///
     /// Returns `true` if there was an entry present.
     ///
-    /// References to sub-directories and files remain valid even after deleting their parent
-    /// directory, so writing to a file after deleting its parent directory will re-create the
-    /// directory on the filesystem, and sync'ing the parent directory will delete the file.
+    /// **This will cause a deadlock** if there are still active references to the deleted entry
+    /// of this directory, i.e. if a lock cannot be acquired any child to delete (recursively)!
     ///
-    /// Make sure to call `sync` to delete any contents on the filesystem if it's possible for
+    /// Make sure to call [`Dir::sync`] to delete any contents on the filesystem if it's possible for
     /// an new entry with the same name to be created later.
-    /// Alternately, call `Dir::delete_and_sync`.
+    /// Alternately, call [`Dir::delete_and_sync`].
     pub fn delete<'a, Q>(
         &'a mut self,
         name: &'a Q,
@@ -337,7 +337,7 @@ impl<FE: FileLoad> Dir<FE> {
         Box::pin(async move {
             if let Some((name, entry)) = self.contents.bisect_and_remove(partial_cmp(name)) {
                 match &entry {
-                    DirEntry::Dir(dir) => dir.delete_self().await,
+                    DirEntry::Dir(dir) => dir.truncate().await,
                     DirEntry::File(file) => file.delete(true).await,
                 }
 
@@ -350,89 +350,99 @@ impl<FE: FileLoad> Dir<FE> {
         })
     }
 
-    /// Delete the entry with the given `name` from this [`Dir`] and the filesystem.
-    ///
-    /// Returns `true` if there was an entry present.
-    pub fn delete_and_sync(
-        &mut self,
-        name: String,
-    ) -> Pin<Box<dyn Future<Output = Result<bool>> + Send + '_>> {
-        Box::pin(async move {
-            if let Some(entry) = self.contents.remove(&name) {
-                match entry {
-                    DirEntry::Dir(dir) => dir.delete_and_sync_self(false).await?,
-                    DirEntry::File(file) => file.delete_and_sync().await?,
-                }
-
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        })
-    }
-
     /// Synchronize the contents of this directory with the filesystem.
     ///
     /// This will create new subdirectories and delete entries from the filesystem,
     /// but will NOT synchronize the contents of any child directories or files.
     pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async move {
-            let mut deleted = OrdHashMap::new();
-            mem::swap(&mut deleted, &mut self.deleted);
+            if self.contents.is_empty() {
+                self.deleted.clear();
 
-            for (_name, entry) in deleted {
-                match entry {
-                    DirEntry::Dir(subdir) => {
-                        let subdir = subdir.write().await;
-                        delete_dir(subdir.path()).await?;
-                    }
-                    DirEntry::File(file) => file.sync().await?,
+                if self.path.exists() {
+                    delete_dir(self.path()).await
+                } else {
+                    Ok(())
                 }
-            }
-
-            for entry in self.contents.values() {
-                match entry {
-                    DirEntry::Dir(dir) => dir.sync().await?,
-                    DirEntry::File(file) => file.sync().await?,
-                }
-            }
-
-            Ok(())
-        })
-    }
-
-    fn delete_self(&mut self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            for (name, entry) in self.contents.drain() {
-                match &entry {
-                    DirEntry::Dir(dir) => dir.delete_self().await,
-                    DirEntry::File(file) => file.delete(false).await,
-                }
-
-                self.deleted.insert(name.clone(), entry);
-            }
-        })
-    }
-
-    fn delete_and_sync_self(
-        &mut self,
-        is_child: bool,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
-        Box::pin(async move {
-            for (_name, entry) in self.contents.drain() {
-                match entry {
-                    DirEntry::Dir(dir) => dir.delete_and_sync_self(true).await?,
-                    DirEntry::File(file) => file.delete(false).await,
-                }
-            }
-
-            if is_child {
-                Ok(()) // the parent directory will be deleted, no need to actually sync here
-            } else if self.path.exists() {
-                Ok(()) // no-op
             } else {
-                delete_dir(&self.path).await
+                for (_name, entry) in self.deleted.drain() {
+                    match entry {
+                        DirEntry::Dir(subdir) => {
+                            let subdir = subdir.write().await;
+                            delete_dir(subdir.path()).await?;
+                        }
+                        DirEntry::File(file) => file.sync().await?,
+                    }
+                }
+
+                for entry in self.contents.values() {
+                    match entry {
+                        DirEntry::Dir(dir) => dir.sync().await?,
+                        DirEntry::File(file) => file.sync().await?,
+                    }
+                }
+
+                Ok(())
             }
+        })
+    }
+
+    /// Delete all entries from this [`Dir`].
+    ///
+    /// **This will cause a deadlock** if there are still active references to the contents
+    /// of this directory, i.e. if a lock cannot be acquired on any child of this [`Dir`]
+    /// (recursively)!
+    ///
+    /// Make sure to call [`Dir::sync`] to delete any contents on the filesystem if it's possible
+    /// for an new entry with the same name to be created later.
+    /// Alternately, call [`Dir::truncate_and_sync`].
+    pub fn truncate<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let mut deletions = FuturesUnordered::new();
+
+            for (name, entry) in self.contents.drain() {
+                deletions.push(async move {
+                    match &entry {
+                        DirEntry::Dir(dir) => dir.truncate().await,
+                        DirEntry::File(file) => file.delete(false).await,
+                    }
+
+                    (name, entry)
+                })
+            }
+
+            while let Some((name, entry)) = deletions.next().await {
+                self.deleted.insert(name, entry);
+            }
+        })
+    }
+
+    /// Delete all entries from this [`Dir`] on the filesystem.
+    ///
+    /// **This will cause a deadlock** if there are still active references to the contents
+    /// of this directory, i.e. if a lock cannot be acquired on any child of this [`Dir`]
+    /// (recursively)!
+    ///
+    /// Make sure to call [`Dir::sync`] to delete any contents on the filesystem if it's possible
+    /// for an new entry with the same name to be created later.
+    /// Alternately, call [`Dir::truncate_and_sync`].
+    pub fn truncate_and_sync<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let deletes = FuturesUnordered::new();
+
+            for (_name, entry) in self.contents.drain() {
+                deletes.push(async move {
+                    match entry {
+                        DirEntry::Dir(dir) => dir.truncate().await,
+                        DirEntry::File(file) => file.delete(false).await,
+                    }
+                })
+            }
+
+            deletes.fold((), |(), ()| future::ready(())).await;
+            delete_dir(self.path()).await
         })
     }
 }
@@ -609,30 +619,20 @@ impl<FE: FileLoad> DirLock<FE> {
         })
     }
 
-    fn delete_self(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+    fn truncate(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
             let mut state = self.state.write().await;
-            state.delete_self().await
-        })
-    }
-
-    fn delete_and_sync_self(
-        &self,
-        is_child: bool,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
-        Box::pin(async move {
-            let mut state = self.state.write().await;
-            state.delete_and_sync_self(is_child).await
+            state.truncate().await
         })
     }
 }
 
 async fn delete_dir(path: &Path) -> Result<()> {
-    match fs::remove_dir_all(path).await {
+    return match fs::remove_dir_all(path).await {
         Ok(()) => Ok(()),
         Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(cause) => Err(cause),
-    }
+    };
 }
 
 #[inline]
