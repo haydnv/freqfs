@@ -148,6 +148,11 @@ impl<FE: FileLoad> Dir<FE> {
         Ok(lock)
     }
 
+    /// Return an [`Iterator`] over the entries in this [`Dir`].
+    pub fn entries(&self) -> impl Iterator<Item = &DirEntry<FE>> {
+        self.contents.values()
+    }
+
     /// Return a new subdirectory of this [`Dir`], creating it if it doesn't already exist.
     pub fn get_or_create_dir(&mut self, name: String) -> Result<DirLock<FE>> {
         // if the requested dir hasn't been deleted
@@ -220,6 +225,11 @@ impl<FE: FileLoad> Dir<FE> {
     /// Return the number of entries in this [`Dir`].
     pub fn len(&self) -> usize {
         self.contents.len()
+    }
+
+    /// Return an [`Iterator`] over the names of the entries in this [`Dir`].
+    pub fn names(&self) -> impl Iterator<Item = &String> {
+        self.contents.keys()
     }
 
     /// Convenience method to lock a file for reading.
