@@ -19,7 +19,7 @@ async-trait = "0.1"
 ds-ext = { path = "../ds-ext" }
 futures = "0.3"
 log = "0.4"
-safecast = "~0.1.4"
+safecast = { path = "../safecast" }
 tokio = { version = "1.25", features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "1.3", features = ["v4"] }
 

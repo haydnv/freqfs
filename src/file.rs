@@ -344,28 +344,15 @@ impl<FE> FileLock<FE> {
     where
         FE: FileLoad + AsType<F>,
     {
-        let mut state = self.state.write().await;
+        self.write_owned().await
+    }
 
-        if state.is_deleted() {
-            return Err(deleted());
-        }
-
-        let guard = if state.is_pending() {
-            let mut contents = self.file.try_write_owned().expect("file contents");
-            let (size, entry) = load(&**self.path).await?;
-            self.cache.bump(&self.path, Some(size));
-
-            *state = FileLockState::Modified(size);
-            *contents = Some(entry);
-
-            contents
-        } else {
-            state.upgrade();
-            self.cache.bump(&self.path, None);
-            self.file.write_owned().await
-        };
-
-        write_type_owned(guard)
+    /// Lock this file for writing synchronously, if possible, without borrowing.
+    pub fn try_into_write<F>(self) -> Result<FileWriteGuardOwned<FE, F>>
+    where
+        FE: FileLoad + AsType<F>,
+    {
+        self.try_write_owned()
     }
 
     /// Back up this file's contents to the filesystem.
