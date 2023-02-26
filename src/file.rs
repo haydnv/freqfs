@@ -15,9 +15,16 @@ use tokio::sync::{
 use super::cache::Cache;
 use super::Result;
 
+/// A read guard on a file
 pub type FileReadGuard<'a, F> = RwLockReadGuard<'a, F>;
+
+/// An owned read guard on a file
 pub type FileReadGuardOwned<FE, F> = OwnedRwLockReadGuard<Option<FE>, F>;
+
+/// A write guard on a file
 pub type FileWriteGuard<'a, F> = RwLockMappedWriteGuard<'a, F>;
+
+/// An owned write guard on a file
 pub type FileWriteGuardOwned<FE, F> = OwnedRwLockMappedWriteGuard<Option<FE>, F>;
 
 const TMP: &'static str = "_freqfs";
@@ -65,6 +72,7 @@ impl FileLockState {
     }
 }
 
+/// A futures-aware read-write lock on a file
 pub struct FileLock<FE> {
     cache: Arc<Cache<FE>>,
     path: Arc<PathBuf>,

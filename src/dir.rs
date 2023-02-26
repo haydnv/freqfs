@@ -81,14 +81,25 @@ name_from_str!(i128);
 name_from_str!(uuid::Uuid);
 
 /// A directory entry, either a [`FileLock`] or a sub-[`DirLock`].
-#[derive(Clone)]
 pub enum DirEntry<FE> {
+    /// A subdirectory
     Dir(DirLock<FE>),
+
+    /// A file in a directory
     File(FileLock<FE>),
 }
 
+impl<FE> Clone for DirEntry<FE> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Dir(dir) => Self::Dir(dir.clone()),
+            Self::File(file) => Self::File(file.clone()),
+        }
+    }
+}
+
 impl<FE> DirEntry<FE> {
-    /// return `Some(dir_lock)` if this `DirEntry` is itself a directory.
+    /// Return `Some(dir_lock)` if this [`DirEntry`] is itself a [`Dir`].
     pub fn as_dir(&self) -> Option<&DirLock<FE>> {
         match self {
             Self::Dir(dir) => Some(dir),
@@ -96,11 +107,27 @@ impl<FE> DirEntry<FE> {
         }
     }
 
-    /// return `Some(file_lock)` if this `DirEntry` is itself a file.
+    /// Return `Some(file_lock)` if this [`DirEntry`] is itself a file.
     pub fn as_file(&self) -> Option<&FileLock<FE>> {
         match self {
             Self::File(file) => Some(file),
             _ => None,
+        }
+    }
+
+    /// Return `true` if this [`DirEntry`] is a [`Dir`].
+    pub fn is_dir(&self) -> bool {
+        match self {
+            Self::Dir(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Return `true` if this [`DirEntry`] is a file.
+    pub fn is_file(&self) -> bool {
+        match self {
+            Self::Dir(_) => true,
+            _ => false,
         }
     }
 }
@@ -341,7 +368,6 @@ impl<FE: FileLoad> Dir<FE> {
     ///
     /// Make sure to call [`Dir::sync`] to delete any contents on the filesystem if it's possible for
     /// an new entry with the same name to be created later.
-    /// Alternately, call [`Dir::delete_and_sync`].
     pub fn delete<'a, Q>(
         &'a mut self,
         name: &'a Q,
@@ -468,7 +494,7 @@ impl<FE> fmt::Debug for Dir<FE> {
     }
 }
 
-/// A clone-able wrapper type over a [`tokio::sync::RwLock`] on a directory.
+/// A clone-able wrapper type over a [`RwLock`] on a directory.
 pub struct DirLock<FE> {
     state: Arc<RwLock<Dir<FE>>>,
 }

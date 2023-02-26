@@ -12,8 +12,9 @@
 //! This crate assumes that file paths are valid Unicode and may panic if it encounters a file path
 //! which is not valid Unicode.
 //!
-//! It also assumes that all file I/O under the cache root directory (the one whose path is passed
-//! to [`load`]) is routed through the cache (not e.g. via [`tokio::fs`] or [`std::fs`] elsewhere).
+//! It also assumes that all file I/O under the cache root directory
+//! (the one whose path is passed to `load`) is routed through the cache
+//! (not e.g. via [`tokio::fs`] or [`std::fs`] elsewhere).
 //! It may raise an [`std::io::Error`] or panic if this assumption is not valid.
 //!
 //! In the case that your program may not have permission to write to a filesystem entry,
@@ -24,7 +25,7 @@ mod cache;
 mod dir;
 mod file;
 
-/// The result of a filesystem operation using [`freqfs`]
+/// The result of a filesystem operation
 pub type Result<T> = std::result::Result<T, std::io::Error>;
 
 pub use cache::Cache;
