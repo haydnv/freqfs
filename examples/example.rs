@@ -1,12 +1,12 @@
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use async_trait::async_trait;
+use destream::en;
 use rand::Rng;
-use safecast::AsType;
+use safecast::as_type;
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use freqfs::*;
 
@@ -15,104 +15,19 @@ enum File {
     Text(String),
 }
 
-#[async_trait]
-impl FileLoad for File {
-    async fn load(path: &Path, mut file: fs::File, metadata: std::fs::Metadata) -> Result<Self> {
-        match path.extension() {
-            Some(ext) if ext.to_str() == Some("bin") => {
-                let mut contents = Vec::with_capacity(metadata.len() as usize);
-                file.read_to_end(&mut contents).await?;
-                Ok(Self::Bin(contents))
-            }
-            Some(ext) if ext.to_str() == Some("txt") => {
-                let mut contents = Vec::with_capacity(metadata.len() as usize);
-                file.read_to_end(&mut contents).await?;
-                String::from_utf8(contents)
-                    .map(Self::Text)
-                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
-            }
-            other => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("unrecognized extension: {:?}", other),
-            )),
-        }
-    }
-
-    async fn save(&self, file: &mut fs::File) -> Result<u64> {
+impl<'en> en::ToStream<'en> for File {
+    fn to_stream<E: en::Encoder<'en>>(&'en self, encoder: E) -> Result<E::Ok, E::Error> {
         match self {
-            Self::Bin(bytes) => {
-                file.write_all(bytes).await?;
-                Ok(bytes.len() as u64)
-            }
-            Self::Text(text) => {
-                let bytes = text.as_bytes();
-                let size = bytes.len();
-                file.write_all(bytes).await?;
-                Ok(size as u64)
-            }
+            Self::Bin(bytes) => bytes.to_stream(encoder),
+            Self::Text(string) => string.to_stream(encoder),
         }
     }
 }
 
-impl AsType<Vec<u8>> for File {
-    fn as_type(&self) -> Option<&Vec<u8>> {
-        match self {
-            Self::Bin(bytes) => Some(bytes),
-            _ => None,
-        }
-    }
+as_type!(File, Bin, Vec<u8>);
+as_type!(File, Text, String);
 
-    fn as_type_mut(&mut self) -> Option<&mut Vec<u8>> {
-        match self {
-            Self::Bin(bytes) => Some(bytes),
-            _ => None,
-        }
-    }
-
-    fn into_type(self) -> Option<Vec<u8>> {
-        match self {
-            Self::Bin(bytes) => Some(bytes),
-            _ => None,
-        }
-    }
-}
-
-impl AsType<String> for File {
-    fn as_type(&self) -> Option<&String> {
-        match self {
-            Self::Text(text) => Some(text),
-            _ => None,
-        }
-    }
-
-    fn as_type_mut(&mut self) -> Option<&mut String> {
-        match self {
-            Self::Text(text) => Some(text),
-            _ => None,
-        }
-    }
-
-    fn into_type(self) -> Option<String> {
-        match self {
-            Self::Text(text) => Some(text),
-            _ => None,
-        }
-    }
-}
-
-impl From<String> for File {
-    fn from(text: String) -> Self {
-        Self::Text(text)
-    }
-}
-
-impl From<Vec<u8>> for File {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self::Bin(bytes)
-    }
-}
-
-async fn setup_tmp_dir() -> Result<PathBuf> {
+async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
     let mut rng = rand::thread_rng();
     loop {
         let rand: u32 = rng.gen();
@@ -124,7 +39,7 @@ async fn setup_tmp_dir() -> Result<PathBuf> {
             file_path.push("hello.txt");
 
             let mut file = fs::File::create(file_path).await?;
-            file.write_all(b"Hello, world!").await?;
+            file.write_all(b"\"Hello, world!\"").await?;
 
             let mut subdir = path.clone();
             subdir.push("subdir");
@@ -135,7 +50,7 @@ async fn setup_tmp_dir() -> Result<PathBuf> {
     }
 }
 
-async fn run_example(cache: DirLock<File>) -> Result<()> {
+async fn run_example(cache: DirLock<File>) -> Result<(), io::Error> {
     let mut root = cache.write().await;
 
     assert_eq!(root.len(), 2);
@@ -214,7 +129,7 @@ async fn run_example(cache: DirLock<File>) -> Result<()> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), io::Error> {
     let path = setup_tmp_dir().await?;
 
     // initialize the cache

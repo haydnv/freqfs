@@ -25,8 +25,7 @@ mod cache;
 mod dir;
 mod file;
 
-/// The result of a filesystem operation
-pub type Result<T> = std::result::Result<T, std::io::Error>;
+type Result<T> = std::result::Result<T, std::io::Error>;
 
 pub use cache::Cache;
 pub use dir::{
@@ -34,5 +33,6 @@ pub use dir::{
     Name,
 };
 pub use file::{
-    FileLoad, FileLock, FileReadGuard, FileReadGuardOwned, FileWriteGuard, FileWriteGuardOwned,
+    FileLoad, FileLock, FileReadGuard, FileReadGuardOwned, FileSave, FileWriteGuard,
+    FileWriteGuardOwned,
 };

@@ -140,7 +140,7 @@ pub struct Dir<FE> {
     deleted: OrdHashMap<String, DirEntry<FE>>,
 }
 
-impl<FE: FileLoad> Dir<FE> {
+impl<FE: Send + Sync> Dir<FE> {
     /// Borrow the [`Path`] of this [`Dir`].
     pub fn path(&self) -> &Path {
         self.path.as_path()
@@ -261,11 +261,11 @@ impl<FE: FileLoad> Dir<FE> {
 
     /// Convenience method to lock a file for reading.
     /// Returns a "not found" error if the there is no file with the given `name`.
-    pub async fn read_file<'a, Q, F>(&'a self, name: &Q) -> Result<FileReadGuard<'a, F>>
+    pub async fn read_file<Q, F>(&self, name: &Q) -> Result<FileReadGuard<F>>
     where
-        F: 'a,
         Q: Name + fmt::Display + ?Sized,
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         if let Some(file) = self.get_file(name) {
             file.read().await
@@ -279,7 +279,8 @@ impl<FE: FileLoad> Dir<FE> {
     pub async fn read_file_owned<Q, F>(&self, name: &Q) -> Result<FileReadGuardOwned<FE, F>>
     where
         Q: Name + fmt::Display + ?Sized,
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         if let Some(file) = self.get_file(name) {
             file.read_owned().await
@@ -290,11 +291,11 @@ impl<FE: FileLoad> Dir<FE> {
 
     /// Convenience method to lock a file for writing.
     /// Returns a "not found" error if the there is no file with the given `name`.
-    pub async fn write_file<'a, Q, F>(&'a self, name: &Q) -> Result<FileWriteGuard<'a, F>>
+    pub async fn write_file<Q, F>(&self, name: &Q) -> Result<FileWriteGuard<F>>
     where
-        F: 'a,
         Q: Name + fmt::Display + ?Sized,
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         if let Some(file) = self.get_file(name) {
             file.write().await
@@ -308,7 +309,8 @@ impl<FE: FileLoad> Dir<FE> {
     pub async fn write_file_owned<Q, F>(&self, name: &Q) -> Result<FileWriteGuardOwned<FE, F>>
     where
         Q: Name + fmt::Display + ?Sized,
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         if let Some(file) = self.get_file(name) {
             file.write_owned().await
@@ -318,7 +320,7 @@ impl<FE: FileLoad> Dir<FE> {
     }
 }
 
-impl<FE: FileLoad> Dir<FE> {
+impl<FE: Send + Sync> Dir<FE> {
     /// Create a new file in this [`Dir`] with the given `contents`.
     pub fn create_file<F>(&mut self, name: String, contents: F, size: usize) -> Result<FileLock<FE>>
     where
@@ -395,7 +397,10 @@ impl<FE: FileLoad> Dir<FE> {
     ///
     /// This will create new subdirectories and delete entries from the filesystem,
     /// but will NOT synchronize the contents of any child directories or files.
-    pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>
+    where
+        FE: for<'a> FileSave<'a>,
+    {
         Box::pin(async move {
             if self.contents.is_empty() {
                 self.deleted.clear();
@@ -507,7 +512,7 @@ impl<FE> Clone for DirLock<FE> {
     }
 }
 
-impl<FE: FileLoad> DirLock<FE> {
+impl<FE: Send + Sync> DirLock<FE> {
     fn new(cache: Arc<Cache<FE>>, path: PathBuf) -> Self {
         let dir = Dir {
             path,
@@ -623,7 +628,10 @@ impl<FE: FileLoad> DirLock<FE> {
     ///
     /// This will create new subdirectories and delete entries from the filesystem,
     /// but will NOT synchronize the contents of any child directories or files.
-    pub fn sync(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    pub fn sync(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>
+    where
+        FE: for<'a> FileSave<'a>,
+    {
         Box::pin(async move {
             let mut dir = self.state.write().await;
             dir.sync().await

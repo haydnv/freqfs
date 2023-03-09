@@ -8,7 +8,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::Duration;
 
 use super::dir::DirLock;
-use super::file::{FileLoad, FileLock};
+use super::file::{FileLock, FileSave};
 use super::Result;
 
 const GC_CYCLE_TIME: Duration = Duration::from_millis(10);
@@ -93,7 +93,7 @@ impl<FE> Cache<FE> {
     }
 }
 
-impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
+impl<FE: for<'a> FileSave<'a>> Cache<FE> {
     /// Initialize the cache.
     ///
     /// `cleanup_interval` specifies how often cache cleanup should run in the background.
@@ -175,7 +175,7 @@ impl<FE: FileLoad + Send + Sync + 'static> Cache<FE> {
     }
 }
 
-fn spawn_cleanup_thread<FE: FileLoad>(
+fn spawn_cleanup_thread<FE: for<'a> FileSave<'a>>(
     cache: Arc<Cache<FE>>,
     mut rx: UnboundedReceiver<Evict>,
 ) -> tokio::task::JoinHandle<()> {

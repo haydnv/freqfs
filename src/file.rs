@@ -29,14 +29,53 @@ pub type FileWriteGuardOwned<FE, F> = OwnedRwLockMappedWriteGuard<Option<FE>, F>
 
 const TMP: &'static str = "_freqfs";
 
-/// Persistence methods for a file-backed data structure.
+/// Load a file-backed data structure.
 #[async_trait]
 pub trait FileLoad: Send + Sync + Sized + 'static {
     /// Load this state from the given `file`.
     async fn load(path: &Path, file: fs::File, metadata: std::fs::Metadata) -> Result<Self>;
+}
 
+/// Write a file-backed data structure to the filesystem.
+#[async_trait]
+pub trait FileSave<'en>: Send + Sync + Sized + 'static {
     /// Save this state to the given `file`.
-    async fn save(&self, file: &mut fs::File) -> Result<u64>;
+    async fn save(&'en self, file: &mut fs::File) -> Result<u64>;
+}
+
+#[cfg(feature = "stream")]
+#[async_trait]
+impl<'en, T> FileLoad for T
+where
+    T: destream::de::FromStream<Context = ()> + Send + Sync + 'static,
+{
+    async fn load(_path: &Path, file: fs::File, _metadata: std::fs::Metadata) -> Result<Self> {
+        tbon::de::read_from((), file)
+            .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause))
+            .await
+    }
+}
+
+#[cfg(feature = "stream")]
+#[async_trait]
+impl<'en, T> FileSave<'en> for T
+where
+    T: destream::en::ToStream<'en> + Send + Sync + 'static,
+{
+    async fn save(&'en self, file: &mut fs::File) -> Result<u64> {
+        use futures::TryStreamExt;
+
+        let encoded = tbon::en::encode(self)
+            .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause))?;
+
+        let mut reader = tokio_util::io::StreamReader::new(
+            encoded
+                .map_ok(bytes::Bytes::from)
+                .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause)),
+        );
+
+        tokio::io::copy(&mut reader, file).await
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -76,8 +115,8 @@ impl FileLockState {
 pub struct FileLock<FE> {
     cache: Arc<Cache<FE>>,
     path: Arc<PathBuf>,
-    file: Arc<RwLock<Option<FE>>>,
     state: Arc<RwLock<FileLockState>>,
+    contents: Arc<RwLock<Option<FE>>>,
 }
 
 impl<FE> Clone for FileLock<FE> {
@@ -85,8 +124,8 @@ impl<FE> Clone for FileLock<FE> {
         Self {
             cache: self.cache.clone(),
             path: self.path.clone(),
-            file: self.file.clone(),
             state: self.state.clone(),
+            contents: self.contents.clone(),
         }
     }
 }
@@ -100,8 +139,8 @@ impl<FE> FileLock<FE> {
         Self {
             cache,
             path: Arc::new(path),
-            file: Arc::new(RwLock::new(Some(contents.into()))),
             state: Arc::new(RwLock::new(FileLockState::Modified(size))),
+            contents: Arc::new(RwLock::new(Some(contents.into()))),
         }
     }
 
@@ -118,16 +157,16 @@ impl<FE> FileLock<FE> {
         Self {
             cache,
             path: Arc::new(path),
-            file: Arc::new(RwLock::new(None)),
             state: Arc::new(RwLock::new(FileLockState::Pending)),
+            contents: Arc::new(RwLock::new(None)),
         }
     }
 
     /// Lock this file for reading.
-    pub async fn read<'a, F>(&'a self) -> Result<FileReadGuard<'a, F>>
+    pub async fn read<F>(&self) -> Result<FileReadGuard<F>>
     where
-        F: 'a,
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         let mut state = self.state.write().await;
 
@@ -136,7 +175,7 @@ impl<FE> FileLock<FE> {
         }
 
         let guard = if state.is_pending() {
-            let mut contents = self.file.try_write().expect("file contents");
+            let mut contents = self.contents.try_write().expect("file contents");
             let (size, entry) = load(&**self.path).await?;
 
             self.cache.bump(&self.path, Some(size));
@@ -147,7 +186,7 @@ impl<FE> FileLock<FE> {
             contents.downgrade()
         } else {
             self.cache.bump(&self.path, None);
-            self.file.read().await
+            self.contents.read().await
         };
 
         read_type(guard)
@@ -156,7 +195,8 @@ impl<FE> FileLock<FE> {
     /// Lock this file for reading synchronously if possible, otherwise return an error.
     pub fn try_read<F>(&self) -> Result<FileReadGuard<F>>
     where
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         let state = self.state.try_read().map_err(would_block)?;
 
@@ -165,7 +205,7 @@ impl<FE> FileLock<FE> {
             FileLockState::Deleted(_sync) => Err(deleted()),
             FileLockState::Read(_size) | FileLockState::Modified(_size) => {
                 self.cache.bump(&self.path, None);
-                let guard = self.file.try_read().map_err(would_block)?;
+                let guard = self.contents.try_read().map_err(would_block)?;
                 read_type(guard)
             }
         }
@@ -174,7 +214,8 @@ impl<FE> FileLock<FE> {
     /// Lock this file for reading.
     pub async fn read_owned<F>(&self) -> Result<FileReadGuardOwned<FE, F>>
     where
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         let mut state = self.state.write().await;
 
@@ -183,7 +224,12 @@ impl<FE> FileLock<FE> {
         }
 
         let guard = if state.is_pending() {
-            let mut contents = self.file.clone().try_write_owned().expect("file contents");
+            let mut contents = self
+                .contents
+                .clone()
+                .try_write_owned()
+                .expect("file contents");
+
             let (size, entry) = load(&**self.path).await?;
 
             self.cache.bump(&self.path, Some(size));
@@ -194,7 +240,7 @@ impl<FE> FileLock<FE> {
             contents.downgrade()
         } else {
             self.cache.bump(&self.path, None);
-            self.file.clone().read_owned().await
+            self.contents.clone().read_owned().await
         };
 
         read_type_owned(guard)
@@ -203,7 +249,8 @@ impl<FE> FileLock<FE> {
     /// Lock this file for reading synchronously if possible, otherwise return an error.
     pub fn try_read_owned<F>(&self) -> Result<FileReadGuardOwned<FE, F>>
     where
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         let state = self.state.try_read().map_err(would_block)?;
 
@@ -212,7 +259,12 @@ impl<FE> FileLock<FE> {
             FileLockState::Deleted(_sync) => Err(deleted()),
             FileLockState::Read(_size) | FileLockState::Modified(_size) => {
                 self.cache.bump(&self.path, None);
-                let guard = self.file.clone().try_read_owned().map_err(would_block)?;
+                let guard = self
+                    .contents
+                    .clone()
+                    .try_read_owned()
+                    .map_err(would_block)?;
+
                 read_type_owned(guard)
             }
         }
@@ -221,7 +273,8 @@ impl<FE> FileLock<FE> {
     /// Lock this file for reading, without borrowing.
     pub async fn into_read<F>(self) -> Result<FileReadGuardOwned<FE, F>>
     where
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         let mut state = self.state.write().await;
 
@@ -230,7 +283,7 @@ impl<FE> FileLock<FE> {
         }
 
         let guard = if state.is_pending() {
-            let mut contents = self.file.try_write_owned().expect("file contents");
+            let mut contents = self.contents.try_write_owned().expect("file contents");
             let (size, entry) = load(&**self.path).await?;
 
             self.cache.bump(&self.path, Some(size));
@@ -241,17 +294,17 @@ impl<FE> FileLock<FE> {
             contents.downgrade()
         } else {
             self.cache.bump(&self.path, None);
-            self.file.read_owned().await
+            self.contents.read_owned().await
         };
 
         read_type_owned(guard)
     }
 
     /// Lock this file for writing.
-    pub async fn write<'a, F>(&'a self) -> Result<FileWriteGuard<'a, F>>
+    pub async fn write<F>(&self) -> Result<FileWriteGuard<F>>
     where
-        F: 'a,
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         let mut state = self.state.write().await;
 
@@ -260,7 +313,7 @@ impl<FE> FileLock<FE> {
         }
 
         let guard = if state.is_pending() {
-            let mut contents = self.file.try_write().expect("file contents");
+            let mut contents = self.contents.try_write().expect("file contents");
             let (size, entry) = load(&**self.path).await?;
 
             self.cache.bump(&self.path, Some(size));
@@ -274,7 +327,7 @@ impl<FE> FileLock<FE> {
         } else {
             state.upgrade();
             self.cache.bump(&self.path, None);
-            self.file.write().await
+            self.contents.write().await
         };
 
         write_type(guard)
@@ -283,7 +336,8 @@ impl<FE> FileLock<FE> {
     /// Lock this file for writing synchronously if possible, otherwise return an error.
     pub fn try_write<F>(&self) -> Result<FileWriteGuard<F>>
     where
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         let mut state = self.state.try_write().map_err(would_block)?;
 
@@ -294,7 +348,7 @@ impl<FE> FileLock<FE> {
         } else {
             state.upgrade();
             self.cache.bump(&self.path, None);
-            let guard = self.file.try_write().map_err(would_block)?;
+            let guard = self.contents.try_write().map_err(would_block)?;
             write_type(guard)
         }
     }
@@ -302,7 +356,8 @@ impl<FE> FileLock<FE> {
     /// Lock this file for writing.
     pub async fn write_owned<F>(&self) -> Result<FileWriteGuardOwned<FE, F>>
     where
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         let mut state = self.state.write().await;
 
@@ -311,7 +366,12 @@ impl<FE> FileLock<FE> {
         }
 
         let guard = if state.is_pending() {
-            let mut contents = self.file.clone().try_write_owned().expect("file contents");
+            let mut contents = self
+                .contents
+                .clone()
+                .try_write_owned()
+                .expect("file contents");
+
             let (size, entry) = load(&**self.path).await?;
             self.cache.bump(&self.path, Some(size));
 
@@ -322,7 +382,7 @@ impl<FE> FileLock<FE> {
         } else {
             state.upgrade();
             self.cache.bump(&self.path, None);
-            self.file.clone().write_owned().await
+            self.contents.clone().write_owned().await
         };
 
         write_type_owned(guard)
@@ -331,7 +391,7 @@ impl<FE> FileLock<FE> {
     /// Lock this file for writing synchronously if possible, otherwise return an error.
     pub fn try_write_owned<F>(&self) -> Result<FileWriteGuardOwned<FE, F>>
     where
-        FE: FileLoad + AsType<F>,
+        FE: AsType<F>,
     {
         let mut state = self.state.try_write().map_err(would_block)?;
 
@@ -342,7 +402,13 @@ impl<FE> FileLock<FE> {
         } else {
             state.upgrade();
             self.cache.bump(&self.path, None);
-            let guard = self.file.clone().try_write_owned().map_err(would_block)?;
+
+            let guard = self
+                .contents
+                .clone()
+                .try_write_owned()
+                .map_err(would_block)?;
+
             write_type_owned(guard)
         }
     }
@@ -350,7 +416,8 @@ impl<FE> FileLock<FE> {
     /// Lock this file for writing, without borrowing.
     pub async fn into_write<F>(self) -> Result<FileWriteGuardOwned<FE, F>>
     where
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         self.write_owned().await
     }
@@ -358,7 +425,8 @@ impl<FE> FileLock<FE> {
     /// Lock this file for writing synchronously, if possible, without borrowing.
     pub fn try_into_write<F>(self) -> Result<FileWriteGuardOwned<FE, F>>
     where
-        FE: FileLoad + AsType<F>,
+        F: FileLoad,
+        FE: AsType<F>,
     {
         self.try_write_owned()
     }
@@ -366,7 +434,7 @@ impl<FE> FileLock<FE> {
     /// Back up this file's contents to the filesystem.
     pub async fn sync(&self) -> Result<()>
     where
-        FE: FileLoad,
+        FE: for<'a> FileSave<'a>,
     {
         let mut state = self.state.write().await;
 
@@ -374,7 +442,7 @@ impl<FE> FileLock<FE> {
             FileLockState::Pending => FileLockState::Pending,
             FileLockState::Read(size) => FileLockState::Read(*size),
             FileLockState::Modified(old_size) => {
-                let contents = self.file.read().await;
+                let contents = self.contents.read().await;
                 let contents = contents.as_ref().expect("file");
 
                 let new_size = persist(self.path.as_path(), contents).await?;
@@ -415,7 +483,7 @@ impl<FE> FileLock<FE> {
 
     pub(crate) fn evict(self) -> Option<(usize, impl Future<Output = Result<()>>)>
     where
-        FE: FileLoad + 'static,
+        FE: for<'a> FileSave<'a> + 'static,
     {
         // if this file is in use, don't evict it
         let mut state = self.state.try_write_owned().ok()?;
@@ -426,11 +494,11 @@ impl<FE> FileLock<FE> {
                 return None;
             }
             FileLockState::Read(size) => {
-                let contents = self.file.try_write_owned().ok()?;
+                let contents = self.contents.try_write_owned().ok()?;
                 (*size, contents, false)
             }
             FileLockState::Modified(size) => {
-                let contents = self.file.try_write_owned().ok()?;
+                let contents = self.contents.try_write_owned().ok()?;
                 (*size, contents, true)
             }
             FileLockState::Deleted(_) => unreachable!("evict a deleted file"),
@@ -464,7 +532,7 @@ impl<FE> fmt::Debug for FileLock<FE> {
     }
 }
 
-async fn load<FE: FileLoad>(path: &Path) -> Result<(usize, FE)> {
+async fn load<F: FileLoad, FE: From<F>>(path: &Path) -> Result<(usize, FE)> {
     let file = fs::File::open(path).await?;
     let metadata = file.metadata().await?;
     let size = match metadata.len().try_into() {
@@ -477,12 +545,13 @@ async fn load<FE: FileLoad>(path: &Path) -> Result<(usize, FE)> {
         }
     };
 
-    let entry = FE::load(path, file, metadata).await?;
+    let file = F::load(path, file, metadata).await?;
+    let entry = FE::from(file);
 
     Ok((size, entry))
 }
 
-async fn persist<FE: FileLoad>(path: &Path, file: &FE) -> Result<u64> {
+async fn persist<'a, FE: FileSave<'a>>(path: &Path, file: &'a FE) -> Result<u64> {
     let tmp = if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
         path.with_extension(format!("{}_{}", ext, TMP))
     } else {
