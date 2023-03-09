@@ -361,6 +361,23 @@ impl<FE: Send + Sync> Dir<FE> {
             .map(|file| (name, file))
     }
 
+    /// Create a new file in this [`Dir`] by copying the given [`FileLock`],
+    /// without reading its contents from the filesystem.
+    pub async fn copy_file_from(&mut self, name: String, source: &FileLock<FE>) -> Result<()>
+    where
+        FE: Clone,
+    {
+        let path = self.path.join(&name);
+        let lock = FileLock::load(self.cache.clone(), path.clone());
+
+        lock.overwrite(source).await?; // this will update the size in the cache
+
+        self.contents.insert(name, DirEntry::File(lock.clone()));
+        self.cache.insert(path, lock, 0); // so just set the size to zero here
+
+        Ok(())
+    }
+
     /// Delete the entry with the given `name` from this [`Dir`].
     ///
     /// Returns `true` if there was an entry present.

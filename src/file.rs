@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::{fmt, io};
 
 use async_trait::async_trait;
-use futures::{Future, TryFutureExt};
+use futures::{join, Future, TryFutureExt};
 use safecast::AsType;
 use tokio::fs;
 use tokio::sync::{
@@ -160,6 +160,44 @@ impl<FE> FileLock<FE> {
             state: Arc::new(RwLock::new(FileLockState::Pending)),
             contents: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Replace the contents of this [`FileLock`] with those of the `other` [`FileLock`],
+    /// without reading from the filesystem.
+    pub async fn overwrite(&self, other: &Self) -> Result<()>
+    where
+        FE: Clone,
+    {
+        let (mut this, that) = join!(self.state.write(), other.state.read());
+
+        let new_size = match &*that {
+            FileLockState::Pending => {
+                *this = FileLockState::Pending;
+                fs::copy(other.path.as_path(), self.path.as_path()).await?;
+                return Ok(());
+            }
+            FileLockState::Deleted(_sync) => {
+                *this = FileLockState::Deleted(true);
+                return Ok(());
+            }
+            FileLockState::Read(size) | FileLockState::Modified(size) => {
+                *this = FileLockState::Modified(*size);
+                *size
+            }
+        };
+
+        let old_size = match &*this {
+            FileLockState::Pending | FileLockState::Deleted(_) => 0,
+            FileLockState::Read(size) | FileLockState::Modified(size) => *size,
+        };
+
+        let (mut this_data, that_data) = join!(self.contents.write(), other.contents.read());
+        let that_data = that_data.as_ref().expect("file");
+        *this_data = Some(FE::clone(&*that_data));
+
+        self.cache.resize(old_size, new_size);
+
+        Ok(())
     }
 
     /// Lock this file for reading.
