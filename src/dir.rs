@@ -175,6 +175,22 @@ impl<FE: Send + Sync> Dir<FE> {
         Ok(lock)
     }
 
+    /// Create and return a new subdirectory of this [`Dir`] with a unique name.
+    pub fn create_dir_unique(&mut self) -> Result<(Uuid, DirLock<FE>)> {
+        let mut name = Uuid::new_v4();
+        while self.contains(&name) {
+            name = Uuid::new_v4();
+        }
+
+        let path = self.path.join(name.to_string());
+        let lock = DirLock::new(self.cache.clone(), path);
+
+        self.contents
+            .insert(name.to_string(), DirEntry::Dir(lock.clone()));
+
+        Ok((name, lock))
+    }
+
     /// Return an [`Iterator`] over the entries in this [`Dir`].
     pub fn entries(&self) -> impl Iterator<Item = &DirEntry<FE>> {
         self.contents.values()
