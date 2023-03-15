@@ -7,7 +7,6 @@ use std::{fmt, io};
 use ds_ext::OrdHashMap;
 use futures::future::{self, Future};
 use futures::stream::{FuturesUnordered, StreamExt};
-use log::warn;
 use safecast::AsType;
 use tokio::fs;
 use tokio::sync::{
@@ -158,7 +157,8 @@ impl<FE: Send + Sync> Dir<FE> {
     /// Create and return a new subdirectory of this [`Dir`].
     pub fn create_dir(&mut self, name: String) -> Result<DirLock<FE>> {
         if self.deleted.remove(&name).is_some() {
-            warn!(
+            #[cfg(feature = "logging")]
+            log::info!(
                 "attempted to create a directory {} in {:?} that already exists",
                 name, self.path
             );
@@ -343,12 +343,11 @@ impl<FE: Send + Sync> Dir<FE> {
         FE: From<F>,
     {
         if self.deleted.remove(&name).is_some() {
-            warn!(
+            #[cfg(feature = "logging")]
+            log::info!(
                 "attempted to create a file {} in {:?} that already exists",
                 name, self.path
             );
-
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
         }
 
         let path = self.path.join(&name);
