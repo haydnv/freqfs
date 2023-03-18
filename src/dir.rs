@@ -160,7 +160,8 @@ impl<FE: Send + Sync> Dir<FE> {
             #[cfg(feature = "logging")]
             log::info!(
                 "attempted to create a directory {} in {:?} that already exists",
-                name, self.path
+                name,
+                self.path
             );
 
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
@@ -177,18 +178,19 @@ impl<FE: Send + Sync> Dir<FE> {
 
     /// Create and return a new subdirectory of this [`Dir`] with a unique name.
     pub fn create_dir_unique(&mut self) -> Result<(Uuid, DirLock<FE>)> {
-        let mut name = Uuid::new_v4();
+        let mut uuid = Uuid::new_v4();
+        let mut name = uuid.to_string();
         while self.contains(&name) {
-            name = Uuid::new_v4();
+            uuid = Uuid::new_v4();
+            name = uuid.to_string();
         }
 
-        let path = self.path.join(name.to_string());
+        let path = self.path.join(name.as_str());
         let lock = DirLock::new(self.cache.clone(), path);
 
-        self.contents
-            .insert(name.to_string(), DirEntry::Dir(lock.clone()));
+        self.contents.insert(name, DirEntry::Dir(lock.clone()));
 
-        Ok((name, lock))
+        Ok((uuid, lock))
     }
 
     /// Return an [`Iterator`] over the entries in this [`Dir`].
@@ -346,7 +348,8 @@ impl<FE: Send + Sync> Dir<FE> {
             #[cfg(feature = "logging")]
             log::info!(
                 "attempted to create a file {} in {:?} that already exists",
-                name, self.path
+                name,
+                self.path
             );
         }
 
@@ -367,13 +370,15 @@ impl<FE: Send + Sync> Dir<FE> {
     where
         FE: From<F>,
     {
-        let mut name = Uuid::new_v4();
+        let mut uuid = Uuid::new_v4();
+        let mut name = uuid.to_string();
         while self.contains(&name) {
-            name = Uuid::new_v4();
+            uuid = Uuid::new_v4();
+            name = uuid.to_string();
         }
 
-        self.create_file(name.to_string(), contents, size)
-            .map(|file| (name, file))
+        self.create_file(name, contents, size)
+            .map(|file| (uuid, file))
     }
 
     /// Create a new file in this [`Dir`] by copying the given [`FileLock`],
