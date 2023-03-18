@@ -173,8 +173,12 @@ impl<FE> FileLock<FE> {
         let new_size = match &*that {
             FileLockState::Pending => {
                 *this = FileLockState::Pending;
-                fs::copy(other.path.as_path(), self.path.as_path()).await?;
-                return Ok(());
+
+                return match fs::copy(other.path.as_path(), self.path.as_path()).await {
+                    Ok(_) => Ok(()),
+                    Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(()),
+                    Err(cause) => Err(cause),
+                };
             }
             FileLockState::Deleted(_sync) => {
                 *this = FileLockState::Deleted(true);
