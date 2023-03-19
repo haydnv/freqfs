@@ -687,7 +687,7 @@ impl<FE: Send + Sync> DirLock<FE> {
     /// Recursively delete empty entries in this [`Dir`].
     /// Returns the number of entries in this [`Dir`].
     /// Call this function immediately after loading the cache to avoid the risk of deadlock.
-    pub fn trim(&self) -> Pin<Box<dyn Future<Output = Result<usize>> + '_>> {
+    pub fn trim(&self) -> Pin<Box<dyn Future<Output = Result<usize>> + Send + '_>> {
         Box::pin(async move {
             let mut entries = self
                 .try_write()
