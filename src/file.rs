@@ -185,7 +185,8 @@ impl<FE> FileLock<FE> {
         let new_size = match &*that {
             FileLockState::Pending => {
                 debug_assert!(other.path.exists());
-                debug_assert!(self.path.parent().expect("file parent dir").exists());
+
+                create_dir(self.path.parent().expect("file parent dir")).await?;
 
                 match fs::copy(other.path.as_path(), self.path.as_path()).await {
                     Ok(_) => {}
