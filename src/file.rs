@@ -94,6 +94,13 @@ impl FileLockState {
         }
     }
 
+    fn is_loaded(&self) -> bool {
+        match self {
+            Self::Read(_) | Self::Modified(_) => true,
+            _ => false,
+        }
+    }
+
     fn is_pending(&self) -> bool {
         match self {
             Self::Pending => true,
@@ -168,21 +175,41 @@ impl<FE> FileLock<FE> {
     where
         FE: Clone,
     {
+        debug_assert!(other.path.exists());
+        debug_assert!(self.path.parent().expect("file parent dir").exists());
+
         let (mut this, that) = join!(self.state.write(), other.state.read());
+
+        let old_size = match &*this {
+            FileLockState::Pending | FileLockState::Deleted(_) => 0,
+            FileLockState::Read(size) | FileLockState::Modified(size) => *size,
+        };
 
         let new_size = match &*that {
             FileLockState::Pending => {
-                *this = FileLockState::Pending;
+                match fs::copy(other.path.as_path(), self.path.as_path()).await {
+                    Ok(_) => {}
+                    Err(cause) if cause.kind() == io::ErrorKind::NotFound => {
+                        #[cfg(debug_assertions)]
+                        let message = format!(
+                            "tried to copy a file from a nonexistent source: {}",
+                            other.path.display()
+                        );
 
-                return match fs::copy(other.path.as_path(), self.path.as_path()).await {
-                    Ok(_) => Ok(()),
-                    Err(cause) if cause.kind() == io::ErrorKind::NotFound => Ok(()),
-                    Err(cause) => Err(cause),
-                };
+                        #[cfg(not(debug_assertions))]
+                        let message = "tried to copy a file from a nonexistent source";
+
+                        return Err(io::Error::new(io::ErrorKind::NotFound, message));
+                    }
+                    Err(cause) => return Err(cause),
+                }
+
+                *this = FileLockState::Pending;
+                0
             }
             FileLockState::Deleted(_sync) => {
                 *this = FileLockState::Deleted(true);
-                return Ok(());
+                0
             }
             FileLockState::Read(size) | FileLockState::Modified(size) => {
                 *this = FileLockState::Modified(*size);
@@ -190,14 +217,11 @@ impl<FE> FileLock<FE> {
             }
         };
 
-        let old_size = match &*this {
-            FileLockState::Pending | FileLockState::Deleted(_) => 0,
-            FileLockState::Read(size) | FileLockState::Modified(size) => *size,
-        };
-
-        let (mut this_data, that_data) = join!(self.contents.write(), other.contents.read());
-        let that_data = that_data.as_ref().expect("file");
-        *this_data = Some(FE::clone(&*that_data));
+        if this.is_loaded() {
+            let (mut this_data, that_data) = join!(self.contents.write(), other.contents.read());
+            let that_data = that_data.as_ref().expect("file");
+            *this_data = Some(FE::clone(&*that_data));
+        }
 
         self.cache.resize(old_size, new_size);
 
@@ -575,7 +599,20 @@ impl<FE> fmt::Debug for FileLock<FE> {
 }
 
 async fn load<F: FileLoad, FE: From<F>>(path: &Path) -> Result<(usize, FE)> {
-    let file = fs::File::open(path).await?;
+    let file = match fs::File::open(path).await {
+        Ok(file) => file,
+        Err(cause) if cause.kind() == io::ErrorKind::NotFound => {
+            #[cfg(debug_assertions)]
+            let message = format!("there is no file at {}", path.display());
+
+            #[cfg(not(debug_assertions))]
+            let message = "the requested file is not in cache and does not exist on the filesystem";
+
+            return Err(io::Error::new(io::ErrorKind::NotFound, message));
+        }
+        Err(cause) => return Err(cause),
+    };
+
     let metadata = file.metadata().await?;
     let size = match metadata.len().try_into() {
         Ok(size) => size,
