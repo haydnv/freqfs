@@ -175,9 +175,6 @@ impl<FE> FileLock<FE> {
     where
         FE: Clone,
     {
-        debug_assert!(other.path.exists());
-        debug_assert!(self.path.parent().expect("file parent dir").exists());
-
         let (mut this, that) = join!(self.state.write(), other.state.read());
 
         let old_size = match &*this {
@@ -187,6 +184,9 @@ impl<FE> FileLock<FE> {
 
         let new_size = match &*that {
             FileLockState::Pending => {
+                debug_assert!(other.path.exists());
+                debug_assert!(self.path.parent().expect("file parent dir").exists());
+
                 match fs::copy(other.path.as_path(), self.path.as_path()).await {
                     Ok(_) => {}
                     Err(cause) if cause.kind() == io::ErrorKind::NotFound => {
