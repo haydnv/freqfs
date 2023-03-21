@@ -16,7 +16,8 @@ name = "example"
 required-features = ["stream"]
 
 [features]
-all = ["logging", "stream"]
+all = ["id", "logging", "stream"]
+id = ["hr-id"]
 logging = ["log"]
 stream = ["bytes", "destream", "tbon", "tokio-util"]
 
@@ -26,6 +27,7 @@ bytes = { version = "1.4", optional = true }
 destream = { path = "../destream", optional = true }
 ds-ext = { path = "../ds-ext" }
 futures = "0.3"
+hr-id = { path = "../hr-id", optional = true }
 log = { version = "0.4", optional = true }
 safecast = { path = "../safecast" }
 tbon = { path = "../tbon", features = ["tokio-io"], optional = true }

@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, io};
 
-use ds_ext::{Id, OrdHashMap};
+use ds_ext::OrdHashMap;
 use futures::future::{self, Future};
 use futures::stream::{FuturesUnordered, StreamExt};
 use safecast::AsType;
@@ -36,7 +36,8 @@ pub trait Name {
     fn partial_cmp(&self, key: &String) -> Option<Ordering>;
 }
 
-impl Name for Id {
+#[cfg(feature = "id")]
+impl Name for hr_id::Id {
     fn partial_cmp(&self, key: &String) -> Option<Ordering> {
         PartialOrd::partial_cmp(self, key)
     }
