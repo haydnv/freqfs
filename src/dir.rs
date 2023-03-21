@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, io};
 
-use ds_ext::OrdHashMap;
+use ds_ext::{Id, OrdHashMap};
 use futures::future::{self, Future};
 use futures::stream::{FuturesUnordered, StreamExt};
 use safecast::AsType;
@@ -34,6 +34,12 @@ pub type DirWriteGuardOwned<FE> = OwnedRwLockWriteGuard<Dir<FE>>;
 /// to avoid unnecessary heap allocations.
 pub trait Name {
     fn partial_cmp(&self, key: &String) -> Option<Ordering>;
+}
+
+impl Name for Id {
+    fn partial_cmp(&self, key: &String) -> Option<Ordering> {
+        PartialOrd::partial_cmp(self, key)
+    }
 }
 
 impl Name for String {
@@ -686,7 +692,6 @@ impl<FE: Send + Sync> DirLock<FE> {
 
     /// Recursively delete empty entries in this [`Dir`].
     /// Returns the number of entries in this [`Dir`].
-    /// Call this function immediately after loading the cache to avoid the risk of deadlock.
     pub fn trim(&self) -> Pin<Box<dyn Future<Output = Result<usize>> + Send + '_>> {
         Box::pin(async move {
             let mut entries = self
