@@ -24,17 +24,17 @@ stream = ["bytes", "destream", "tbon", "tokio-util"]
 [dependencies]
 async-trait = "0.1"
 bytes = { version = "1.4", optional = true }
-destream = { path = "../destream", optional = true }
-ds-ext = { path = "../ds-ext" }
+destream = { version = "0.7", optional = true }
+ds-ext = "0.1"
 futures = "0.3"
-hr-id = { path = "../hr-id", optional = true }
+hr-id = { version = "0.4", optional = true }
 log = { version = "0.4", optional = true }
-safecast = { path = "../safecast" }
-tbon = { path = "../tbon", features = ["tokio-io"], optional = true }
-tokio = { version = "1.25", features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
+safecast = "0.2"
+tbon = { version = "0.5", features = ["tokio-io"], optional = true }
+tokio = { version = "1.29", features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"], optional = true }
-uuid = { version = "1.3", features = ["v4"] }
+uuid = { version = "1.4", features = ["v4"] }
 
 [dev-dependencies]
 rand = "0.8"
-tokio = { version = "1.25", features = ["macros"] }
+tokio = { version = "1.29", features = ["macros"] }
