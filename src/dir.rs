@@ -205,6 +205,17 @@ impl<FE: Send + Sync> Dir<FE> {
         self.contents.values()
     }
 
+    /// Return an [`Iterator`] over the file entries in this [`Dir`].
+    pub fn files(&self) -> impl Iterator<Item = &FileLock<FE>> {
+        self.contents.values().filter_map(|entry| {
+            if let DirEntry::File(file) = entry {
+                Some(file)
+            } else {
+                None
+            }
+        })
+    }
+
     /// Return a new subdirectory of this [`Dir`], creating it if it doesn't already exist.
     pub fn get_or_create_dir(&mut self, name: String) -> Result<DirLock<FE>> {
         // if the requested dir hasn't been deleted
