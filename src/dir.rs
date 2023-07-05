@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -29,6 +30,61 @@ pub type DirWriteGuard<'a, FE> = RwLockWriteGuard<'a, Dir<FE>>;
 
 /// An owned write lock on a directory.
 pub type DirWriteGuardOwned<FE> = OwnedRwLockWriteGuard<Dir<FE>>;
+
+/// A helper trait to coerce container types like [`Arc`] into a borrowed [`Dir`].
+pub trait DirDeref {
+    type Entry;
+
+    fn as_dir(&self) -> &Dir<Self::Entry>;
+}
+
+impl<'a, FE> DirDeref for DirReadGuard<'a, FE> {
+    type Entry = FE;
+
+    fn as_dir(&self) -> &Dir<FE> {
+        self.deref()
+    }
+}
+
+impl<'a, FE> DirDeref for Arc<DirReadGuard<'a, FE>> {
+    type Entry = FE;
+
+    fn as_dir(&self) -> &Dir<FE> {
+        self.deref().as_dir()
+    }
+}
+
+impl<FE> DirDeref for DirReadGuardOwned<FE> {
+    type Entry = FE;
+
+    fn as_dir(&self) -> &Dir<FE> {
+        self.deref()
+    }
+}
+
+impl<FE> DirDeref for Arc<DirReadGuardOwned<FE>> {
+    type Entry = FE;
+
+    fn as_dir(&self) -> &Dir<FE> {
+        self.deref().as_dir()
+    }
+}
+
+impl<'a, FE> DirDeref for DirWriteGuard<'a, FE> {
+    type Entry = FE;
+
+    fn as_dir(&self) -> &Dir<FE> {
+        self.deref()
+    }
+}
+
+impl<FE> DirDeref for DirWriteGuardOwned<FE> {
+    type Entry = FE;
+
+    fn as_dir(&self) -> &Dir<FE> {
+        self.deref()
+    }
+}
 
 /// A type that can be used to look up a directory entry without calling `to_string()`,
 /// to avoid unnecessary heap allocations.

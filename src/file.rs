@@ -1,4 +1,5 @@
 use std::convert::TryInto;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fmt, io};
@@ -15,6 +16,8 @@ use tokio::sync::{
 use super::cache::Cache;
 use super::Result;
 
+const TMP: &'static str = "_freqfs";
+
 /// A read guard on a file
 pub type FileReadGuard<'a, F> = RwLockReadGuard<'a, F>;
 
@@ -27,7 +30,60 @@ pub type FileWriteGuard<'a, F> = RwLockMappedWriteGuard<'a, F>;
 /// An owned write guard on a file
 pub type FileWriteGuardOwned<FE, F> = OwnedRwLockMappedWriteGuard<Option<FE>, F>;
 
-const TMP: &'static str = "_freqfs";
+/// A helper trait to coerce container types like [`Arc`] into a borrowed [`Dir`].
+pub trait FileDeref {
+    type File;
+
+    fn as_file(&self) -> &Self::File;
+}
+
+impl<'a, F> FileDeref for FileReadGuard<'a, F> {
+    type File = F;
+
+    fn as_file(&self) -> &F {
+        self.deref()
+    }
+}
+
+impl<'a, F> FileDeref for Arc<FileReadGuard<'a, F>> {
+    type File = F;
+
+    fn as_file(&self) -> &F {
+        self.deref().as_file()
+    }
+}
+
+impl<FE, F> FileDeref for FileReadGuardOwned<FE, F> {
+    type File = F;
+
+    fn as_file(&self) -> &F {
+        self.deref()
+    }
+}
+
+impl<FE, F> FileDeref for Arc<FileReadGuardOwned<FE, F>> {
+    type File = F;
+
+    fn as_file(&self) -> &F {
+        self.deref().as_file()
+    }
+}
+
+impl<'a, F> FileDeref for FileWriteGuard<'a, F> {
+    type File = F;
+
+    fn as_file(&self) -> &F {
+        self.deref()
+    }
+}
+
+impl<FE, F> FileDeref for FileWriteGuardOwned<FE, F> {
+    type File = F;
+
+    fn as_file(&self) -> &F {
+        self.deref()
+    }
+}
 
 /// Load a file-backed data structure.
 #[async_trait]
