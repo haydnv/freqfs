@@ -209,34 +209,29 @@ impl<FE: Send + Sync> Dir<FE> {
     }
 
     /// Return `true` if this [`Dir`] has an entry with the given `name`.
-    pub fn contains<Q: Name + ?Sized>(&self, name: &Q) -> bool {
-        if self.deleted.bisect(partial_cmp(name)).is_some() {
-            false
-        } else {
-            self.contents.bisect(partial_cmp(name)).is_some()
-        }
+    pub fn contains<Q: Name + fmt::Display + ?Sized>(&self, name: &Q) -> bool {
+        self.contents.bisect(partial_cmp(name)).is_some()
     }
 
     /// Create and return a new subdirectory of this [`Dir`].
     pub fn create_dir(&mut self, name: String) -> Result<DirLock<FE>> {
-        if self.deleted.remove(&name).is_some() {
+        if self.contains(&name) {
+            Err(io::Error::new(io::ErrorKind::AlreadyExists, name))
+        } else if self.deleted.contains_key(&name) {
             #[cfg(feature = "logging")]
-            log::info!(
-                "attempted to create a directory {} in {:?} that already exists",
+            log::debug!(
+                "attempted to re-create a directory {} in {:?}",
                 name,
                 self.path
             );
 
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, name));
+            Err(io::Error::new(io::ErrorKind::AlreadyExists, name))
+        } else {
+            let path = self.path.join(&name);
+            let lock = DirLock::new(self.cache.clone(), path);
+            self.contents.insert(name, DirEntry::Dir(lock.clone()));
+            Ok(lock)
         }
-
-        let path = self.path.join(&name);
-
-        let lock = DirLock::new(self.cache.clone(), path);
-
-        self.contents.insert(name, DirEntry::Dir(lock.clone()));
-
-        Ok(lock)
     }
 
     /// Create and return a new subdirectory of this [`Dir`] with a unique name.
@@ -250,9 +245,7 @@ impl<FE: Send + Sync> Dir<FE> {
 
         let path = self.path.join(name.as_str());
         let lock = DirLock::new(self.cache.clone(), path);
-
         self.contents.insert(name, DirEntry::Dir(lock.clone()));
-
         Ok((uuid, lock))
     }
 
@@ -274,46 +267,25 @@ impl<FE: Send + Sync> Dir<FE> {
 
     /// Return a new subdirectory of this [`Dir`], creating it if it doesn't already exist.
     pub fn get_or_create_dir(&mut self, name: String) -> Result<DirLock<FE>> {
-        // if the requested dir hasn't been deleted
-        if let Some(entry) = self.deleted.remove(&name) {
-            // and it already exists
-            // then return the existing dir
-            return match entry {
-                DirEntry::Dir(dir_lock) => Ok(dir_lock.clone()),
-                DirEntry::File(file) => Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("there is already a file at {}: {:?}", name, file),
-                )),
-            };
+        if let Some(dir) = self.get_dir(&name) {
+            Ok(dir.clone())
+        } else {
+            self.create_dir(name)
         }
-
-        let path = self.path.join(&name);
-
-        let lock = DirLock::new(self.cache.clone(), path);
-        self.contents.insert(name, DirEntry::Dir(lock.clone()));
-        Ok(lock)
     }
 
     /// Get the entry with the given `name` from this [`Dir`].
     pub fn get<Q: Name + ?Sized>(&self, name: &Q) -> Option<&DirEntry<FE>> {
-        if self.deleted.bisect(partial_cmp(name)).is_some() {
-            None
-        } else {
-            self.contents.bisect(partial_cmp(name))
-        }
+        self.contents.bisect(partial_cmp(name))
     }
 
     /// Get the subdirectory with the given `name` from this [`Dir`], if present.
     ///
     /// Also returns `None` if the entry at `name` is a file.
     pub fn get_dir<Q: Name + ?Sized>(&self, name: &Q) -> Option<&DirLock<FE>> {
-        if self.deleted.bisect(partial_cmp(name)).is_some() {
-            None
-        } else {
-            match self.contents.bisect(partial_cmp(name)) {
-                Some(DirEntry::Dir(dir_lock)) => Some(dir_lock),
-                _ => None,
-            }
+        match self.contents.bisect(partial_cmp(name)) {
+            Some(DirEntry::Dir(dir_lock)) => Some(dir_lock),
+            _ => None,
         }
     }
 
@@ -321,13 +293,9 @@ impl<FE: Send + Sync> Dir<FE> {
     ///
     /// Also returns `None` if the entry at `name` is a directory.
     pub fn get_file<Q: Name + ?Sized>(&self, name: &Q) -> Option<&FileLock<FE>> {
-        if self.deleted.bisect(partial_cmp(name)).is_some() {
-            None
-        } else {
-            match self.contents.bisect(partial_cmp(name)) {
-                Some(DirEntry::File(file_lock)) => Some(file_lock),
-                _ => None,
-            }
+        match self.contents.bisect(partial_cmp(name)) {
+            Some(DirEntry::File(file_lock)) => Some(file_lock),
+            _ => None,
         }
     }
 
@@ -420,11 +388,7 @@ impl<FE: Send + Sync> Dir<FE> {
     {
         if self.deleted.remove(&name).is_some() {
             #[cfg(feature = "logging")]
-            log::info!(
-                "attempted to create a file {} in {:?} that already exists",
-                name,
-                self.path
-            );
+            log::debug!("re-creating deleted file {} in {:?}", name, self.path);
         }
 
         let path = self.path.join(&name);
@@ -499,6 +463,9 @@ impl<FE: Send + Sync> Dir<FE> {
     {
         Box::pin(async move {
             if let Some((name, entry)) = self.contents.bisect_and_remove(partial_cmp(name)) {
+                #[cfg(feature = "logging")]
+                log::trace!("deleting dir entry {name}...");
+
                 match &entry {
                     DirEntry::Dir(dir) => dir.truncate().await,
                     DirEntry::File(file) => file.delete(true).await,
@@ -514,9 +481,6 @@ impl<FE: Send + Sync> Dir<FE> {
     }
 
     /// Synchronize the contents of this directory with the filesystem.
-    ///
-    /// This will create new subdirectories and delete entries from the filesystem,
-    /// but will NOT synchronize the contents of any child directories or files.
     pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>
     where
         FE: for<'a> FileSave<'a>,
@@ -564,6 +528,9 @@ impl<FE: Send + Sync> Dir<FE> {
     /// Alternately, call [`Dir::truncate_and_sync`].
     pub fn truncate<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
+            #[cfg(feature = "logging")]
+            log::trace!("truncate dir at {}", self.path.display());
+
             let mut deletions = FuturesUnordered::new();
 
             for (name, entry) in self.contents.drain() {
@@ -596,6 +563,9 @@ impl<FE: Send + Sync> Dir<FE> {
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
+            #[cfg(feature = "logging")]
+            log::trace!("truncate and sync {}", self.path.display());
+
             let deletes = FuturesUnordered::new();
 
             for (_name, entry) in self.contents.drain() {
@@ -648,6 +618,9 @@ impl<FE: Send + Sync> DirLock<FE> {
 
     // This doesn't need to be async since it's only called at initialization time
     pub(crate) fn load<'a>(cache: Arc<Cache<FE>>, path: PathBuf) -> Result<Self> {
+        #[cfg(feature = "logging")]
+        log::trace!("load cached dir at {}", path.display());
+
         let mut contents = OrdHashMap::new();
         let mut handles = std::fs::read_dir(&path)?;
 
@@ -661,7 +634,11 @@ impl<FE: Send + Sync> DirLock<FE> {
                 )
             })?;
 
+            #[cfg(feature = "logging")]
+            log::trace!("loading cached dir entry {name}...");
+
             let meta = handle.metadata()?;
+
             if meta.is_dir() {
                 let subdirectory = Self::load(cache.clone(), handle.path())?;
                 contents.insert(name, DirEntry::Dir(subdirectory));
@@ -745,9 +722,6 @@ impl<FE: Send + Sync> DirLock<FE> {
     }
 
     /// Synchronize the contents of this directory with the filesystem.
-    ///
-    /// This will create new subdirectories and delete entries from the filesystem,
-    /// but will NOT synchronize the contents of any child directories or files.
     pub fn sync(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>
     where
         FE: for<'a> FileSave<'a>,
@@ -765,6 +739,9 @@ impl<FE: Send + Sync> DirLock<FE> {
             let mut entries = self
                 .try_write()
                 .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))?;
+
+            #[cfg(feature = "logging")]
+            log::trace!("trim directory {}", entries.path().display());
 
             let mut sizes = Vec::with_capacity(entries.len());
             for (name, entry) in entries.iter() {
