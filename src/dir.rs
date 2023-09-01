@@ -419,6 +419,51 @@ impl<FE: Send + Sync> Dir<FE> {
             .map(|file| (uuid, file))
     }
 
+    /// Create or overwrite the directory at `name` by copying from `source`,
+    /// without necessarily loading its contents into the cache.
+    pub fn copy_dir_from<'a>(
+        &'a mut self,
+        name: String,
+        source: &'a DirLock<FE>,
+    ) -> Pin<Box<dyn Future<Output = Result<DirLock<FE>>> + Send + 'a>>
+    where
+        FE: Clone,
+    {
+        Box::pin(async move {
+            if self.contains(&name) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("there is already an entry at {name}"),
+                ));
+            }
+
+            let source = source.read().await;
+
+            let dir = self.create_dir(name)?;
+
+            {
+                let mut dest = dir.try_write()?;
+
+                // do these copies in-order to avoid the risk of a deadlock
+                // in case any of the contents are locked
+                for (name, entry) in source.iter() {
+                    let name = name.clone();
+
+                    match entry {
+                        DirEntry::Dir(dir) => {
+                            dest.copy_dir_from(name, dir).await?;
+                        }
+                        DirEntry::File(file) => {
+                            dest.copy_file_from(name, file).await?;
+                        }
+                    }
+                }
+            }
+
+            Ok(dir)
+        })
+    }
+
     /// Create or overwrite the file at `name` by copying from `source`,
     /// without necessarily loading `source` into the cache.
     pub async fn copy_file_from(
@@ -528,9 +573,6 @@ impl<FE: Send + Sync> Dir<FE> {
     /// Alternately, call [`Dir::truncate_and_sync`].
     pub fn truncate<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            #[cfg(feature = "logging")]
-            log::trace!("truncate dir at {}", self.path.display());
-
             let mut deletions = FuturesUnordered::new();
 
             for (name, entry) in self.contents.drain() {
@@ -555,17 +597,10 @@ impl<FE: Send + Sync> Dir<FE> {
     /// **This will cause a deadlock** if there are still active references to the contents
     /// of this directory, i.e. if a lock cannot be acquired on any child of this [`Dir`]
     /// (recursively)!
-    ///
-    /// Make sure to call [`Dir::sync`] to delete any contents on the filesystem if it's possible
-    /// for an new entry with the same name to be created later.
-    /// Alternately, call [`Dir::truncate_and_sync`].
     pub fn truncate_and_sync<'a>(
         &'a mut self,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            #[cfg(feature = "logging")]
-            log::trace!("truncate and sync {}", self.path.display());
-
             let deletes = FuturesUnordered::new();
 
             for (_name, entry) in self.contents.drain() {
