@@ -30,7 +30,7 @@ futures = "0.3"
 hr-id = { version = "0.4", optional = true }
 log = { version = "0.4", optional = true }
 safecast = "0.2"
-tbon = { path = "../tbon", features = ["tokio-io"], optional = true }
+tbon = { version = "0.5", features = ["tokio-io"], optional = true }
 tokio = { version = "1.32", features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"], optional = true }
 uuid = { version = "1.4", features = ["v4"] }
