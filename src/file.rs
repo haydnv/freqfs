@@ -30,10 +30,12 @@ pub type FileWriteGuard<'a, F> = RwLockMappedWriteGuard<'a, F>;
 /// An owned write guard on a file
 pub type FileWriteGuardOwned<FE, F> = OwnedRwLockMappedWriteGuard<Option<FE>, F>;
 
-/// A helper trait to coerce container types like [`Arc`] into a borrowed [`Dir`].
+/// A helper trait to coerce container types like [`Arc`] into a borrowed file.
 pub trait FileDeref {
+    /// The type of file referenced
     type File;
 
+    /// Borrow this instance as a [`Self::File`]
     fn as_file(&self) -> &Self::File;
 }
 
@@ -565,6 +567,9 @@ impl<FE> FileLock<FE> {
             FileLockState::Pending => FileLockState::Pending,
             FileLockState::Read(size) => FileLockState::Read(*size),
             FileLockState::Modified(old_size) => {
+                #[cfg(feature = "logging")]
+                log::trace!("sync modified file {}...", self.path.display());
+
                 let contents = self.contents.read().await;
                 let contents = contents.as_ref().expect("file");
 

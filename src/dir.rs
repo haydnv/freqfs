@@ -33,8 +33,10 @@ pub type DirWriteGuardOwned<FE> = OwnedRwLockWriteGuard<Dir<FE>>;
 
 /// A helper trait to coerce container types like [`Arc`] into a borrowed [`Dir`].
 pub trait DirDeref {
+    /// The type of [`Dir`] referenced
     type Entry;
 
+    /// Borrow this instance as a [`Self::Entry`]
     fn as_dir(&self) -> &Dir<Self::Entry>;
 }
 
@@ -117,10 +119,12 @@ impl Name for Arc<String> {
     }
 }
 
+/// Implement [`Name`] for a type which implements [`std::str::FromStr`],
+/// to compare with a key type which dereferences to a [`str`].
 #[macro_export]
 macro_rules! name_from_str {
     ($t:ty) => {
-        impl Name for $t {
+        impl $crate::Name for $t {
             fn partial_cmp(&self, key: &String) -> Option<std::cmp::Ordering> {
                 let key = key.parse().ok()?;
                 std::cmp::PartialOrd::partial_cmp(self, &key)
