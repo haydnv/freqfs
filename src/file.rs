@@ -739,13 +739,6 @@ async fn persist<'a, FE: FileSave<'a>>(path: &Path, file: &'a FE) -> Result<u64>
             })
             .await?;
 
-        tmp_file
-            .sync_all()
-            .map_err(|cause| {
-                io::Error::new(cause.kind(), format!("failed to sync tmp file: {}", cause))
-            })
-            .await?;
-
         size
     };
 
