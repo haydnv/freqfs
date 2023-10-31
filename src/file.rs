@@ -717,14 +717,16 @@ async fn persist<'a, FE: FileSave<'a>>(path: &Path, file: &'a FE) -> Result<u64>
 
             assert!(parent.exists());
 
-            fs::File::create(tmp.as_path())
+            let tmp_file = fs::File::create(tmp.as_path())
                 .map_err(|cause| {
                     io::Error::new(
                         cause.kind(),
                         format!("failed to create tmp file: {}", cause),
                     )
                 })
-                .await?
+                .await?;
+
+            tmp_file
         };
 
         assert!(tmp.exists());

@@ -705,6 +705,11 @@ impl<FE: Send + Sync> DirLock<FE> {
         self.state.read().await
     }
 
+    /// Lock this directory for reading, without borrowing.
+    pub async fn into_read(self) -> DirReadGuardOwned<FE> {
+        self.state.read_owned().await
+    }
+
     /// Lock this directory for reading synchronously, if possible.
     pub fn try_read(&self) -> Result<DirReadGuard<FE>> {
         self.state
@@ -725,14 +730,19 @@ impl<FE: Send + Sync> DirLock<FE> {
             .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
     }
 
-    /// Lock this directory for reading, without borrowing.
-    pub async fn into_read(self) -> DirReadGuardOwned<FE> {
-        self.state.read_owned().await
-    }
-
     /// Lock this directory for writing.
     pub async fn write(&self) -> DirWriteGuard<FE> {
         self.state.write().await
+    }
+
+    /// Lock this directory for writing.
+    pub async fn write_owned(&self) -> DirWriteGuardOwned<FE> {
+        self.state.clone().write_owned().await
+    }
+
+    /// Lock this directory for writing, without borrowing.
+    pub async fn into_write(self) -> DirWriteGuardOwned<FE> {
+        self.state.write_owned().await
     }
 
     /// Lock this directory for writing synchronously, if possible.
@@ -742,22 +752,12 @@ impl<FE: Send + Sync> DirLock<FE> {
             .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
     }
 
-    /// Lock this directory for writing.
-    pub async fn write_owned(&self) -> DirWriteGuardOwned<FE> {
-        self.state.clone().write_owned().await
-    }
-
     /// Lock this directory for writing synchronously, if possible.
     pub fn try_write_owned(&self) -> Result<DirWriteGuardOwned<FE>> {
         self.state
             .clone()
             .try_write_owned()
             .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))
-    }
-
-    /// Lock this directory for writing, without borrowing.
-    pub async fn into_write(self) -> DirWriteGuardOwned<FE> {
-        self.state.write_owned().await
     }
 
     /// Synchronize the contents of this directory with the filesystem.
