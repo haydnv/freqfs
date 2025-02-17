@@ -3,8 +3,6 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fmt, io};
-
-use async_trait::async_trait;
 use futures::{join, Future, TryFutureExt};
 use safecast::AsType;
 use tokio::fs;
@@ -88,22 +86,21 @@ impl<FE, F> FileDeref for FileWriteGuardOwned<FE, F> {
 }
 
 /// Load a file-backed data structure.
-#[async_trait]
+#[trait_variant::make(Send)]
 pub trait FileLoad: Send + Sync + Sized + 'static {
     /// Load this state from the given `file`.
     async fn load(path: &Path, file: fs::File, metadata: std::fs::Metadata) -> Result<Self>;
 }
 
 /// Write a file-backed data structure to the filesystem.
-#[async_trait]
-pub trait FileSave<'en>: Send + Sync + Sized + 'static {
+#[trait_variant::make(Send)]
+pub trait FileSave: Send + Sync + Sized + 'static {
     /// Save this state to the given `file`.
-    async fn save(&'en self, file: &mut fs::File) -> Result<u64>;
+    async fn save(&self, file: &mut fs::File) -> Result<u64>;
 }
 
 #[cfg(feature = "stream")]
-#[async_trait]
-impl<'en, T> FileLoad for T
+impl<T> FileLoad for T
 where
     T: destream::de::FromStream<Context = ()> + Send + Sync + 'static,
 {
@@ -115,12 +112,11 @@ where
 }
 
 #[cfg(feature = "stream")]
-#[async_trait]
-impl<'en, T> FileSave<'en> for T
+impl<T> FileSave for T
 where
-    T: destream::en::ToStream<'en> + Send + Sync + 'static,
+    T: for<'en> destream::en::ToStream<'en> + Send + Sync + 'static,
 {
-    async fn save(&'en self, file: &mut fs::File) -> Result<u64> {
+    async fn save(&self, file: &mut fs::File) -> Result<u64> {
         use futures::TryStreamExt;
 
         let encoded = tbon::en::encode(self)
@@ -559,7 +555,7 @@ impl<FE> FileLock<FE> {
     /// Back up this file's contents to the filesystem.
     pub async fn sync(&self) -> Result<()>
     where
-        FE: for<'a> FileSave<'a>,
+        FE: FileSave + Clone,
     {
         let mut state = self.state.write().await;
 
@@ -571,9 +567,9 @@ impl<FE> FileLock<FE> {
                 log::trace!("sync modified file {}...", self.path.display());
 
                 let contents = self.contents.read().await;
-                let contents = contents.as_ref().expect("file");
+                let contents = contents.as_ref().cloned().expect("file");
 
-                let new_size = persist(self.path.as_path(), contents).await?;
+                let new_size = persist(self.path.clone(), contents).await?;
 
                 self.cache.resize(*old_size, new_size as usize);
                 FileLockState::Read(new_size as usize)
@@ -609,9 +605,9 @@ impl<FE> FileLock<FE> {
         *file_state = FileLockState::Deleted(file_only);
     }
 
-    pub(crate) fn evict(self) -> Option<(usize, impl Future<Output = Result<()>>)>
+    pub(crate) fn evict(self) -> Option<(usize, impl Future<Output = Result<()>> + Send)>
     where
-        FE: for<'a> FileSave<'a> + 'static,
+        FE: FileSave + Clone + 'static,
     {
         // if this file is in use, don't evict it
         let mut state = self.state.try_write_owned().ok()?;
@@ -634,8 +630,8 @@ impl<FE> FileLock<FE> {
 
         let eviction = async move {
             if modified {
-                let contents = contents.as_ref().expect("file");
-                persist(self.path.as_path(), contents).await?;
+                let contents = contents.as_ref().cloned().expect("file");
+                persist(self.path.clone(), contents).await?;
             }
 
             self.cache.resize(old_size, 0);
@@ -692,66 +688,73 @@ async fn load<F: FileLoad, FE: From<F>>(path: &Path) -> Result<(usize, FE)> {
     Ok((size, entry))
 }
 
-async fn persist<'a, FE: FileSave<'a>>(path: &Path, file: &'a FE) -> Result<u64> {
-    let tmp = if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-        path.with_extension(format!("{}_{}", ext, TMP))
-    } else {
-        path.with_extension(TMP)
-    };
-
-    let size = {
-        let mut tmp_file = if tmp.exists() {
-            fs::OpenOptions::new()
-                .truncate(true)
-                .write(true)
-                .open(tmp.as_path())
-                .await?
+// TODO: use borrowed rather than owned parameters
+// when https://github.com/rust-lang/rust/issues/100013 is resolved
+fn persist<'a, FE: FileSave>(
+    path: Arc<PathBuf>,
+    file: FE,
+) -> impl Future<Output = Result<u64>> + Send {
+    async move {
+        let tmp = if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+            path.with_extension(format!("{}_{}", ext, TMP))
         } else {
-            let parent = tmp.parent().expect("dir");
-            let mut i = 0;
-            while !parent.exists() {
-                create_dir(parent).await?;
-                tokio::time::sleep(tokio::time::Duration::from_millis(i)).await;
-                i += 1;
-            }
+            path.with_extension(TMP)
+        };
 
-            assert!(parent.exists());
+        let size = {
+            let mut tmp_file = if tmp.exists() {
+                fs::OpenOptions::new()
+                    .truncate(true)
+                    .write(true)
+                    .open(tmp.as_path())
+                    .await?
+            } else {
+                let parent = tmp.parent().expect("dir");
+                let mut i = 0;
+                while !parent.exists() {
+                    create_dir(parent).await?;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(i)).await;
+                    i += 1;
+                }
 
-            let tmp_file = fs::File::create(tmp.as_path())
+                assert!(parent.exists());
+
+                let tmp_file = fs::File::create(tmp.as_path())
+                    .map_err(|cause| {
+                        io::Error::new(
+                            cause.kind(),
+                            format!("failed to create tmp file: {}", cause),
+                        )
+                    })
+                    .await?;
+
+                tmp_file
+            };
+
+            assert!(tmp.exists());
+            assert!(!tmp.is_dir());
+
+            let size = file
+                .save(&mut tmp_file)
                 .map_err(|cause| {
-                    io::Error::new(
-                        cause.kind(),
-                        format!("failed to create tmp file: {}", cause),
-                    )
+                    io::Error::new(cause.kind(), format!("failed to save tmp file: {}", cause))
                 })
                 .await?;
 
-            tmp_file
+            size
         };
 
-        assert!(tmp.exists());
-        assert!(!tmp.is_dir());
-
-        let size = file
-            .save(&mut tmp_file)
+        tokio::fs::rename(tmp.as_path(), path.as_path())
             .map_err(|cause| {
-                io::Error::new(cause.kind(), format!("failed to save tmp file: {}", cause))
+                io::Error::new(
+                    cause.kind(),
+                    format!("failed to rename tmp file: {}", cause),
+                )
             })
             .await?;
 
-        size
-    };
-
-    tokio::fs::rename(tmp.as_path(), path)
-        .map_err(|cause| {
-            io::Error::new(
-                cause.kind(),
-                format!("failed to rename tmp file: {}", cause),
-            )
-        })
-        .await?;
-
-    Ok(size)
+        Ok(size)
+    }
 }
 
 async fn create_dir(path: &Path) -> Result<()> {

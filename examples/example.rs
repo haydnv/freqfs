@@ -10,6 +10,7 @@ use tokio::io::AsyncWriteExt;
 
 use freqfs::*;
 
+#[derive(Clone)]
 enum File {
     Bin(Vec<u8>),
     Text(String),
@@ -28,9 +29,9 @@ as_type!(File, Bin, Vec<u8>);
 as_type!(File, Text, String);
 
 async fn setup_tmp_dir() -> Result<PathBuf, io::Error> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     loop {
-        let rand: u32 = rng.gen();
+        let rand: u32 = rng.random();
         let path = PathBuf::from(format!("/tmp/test_freqfs_{}", rand));
         if !path.exists() {
             fs::create_dir(&path).await?;

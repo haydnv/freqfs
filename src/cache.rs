@@ -93,7 +93,10 @@ impl<FE> Cache<FE> {
     }
 }
 
-impl<FE: for<'a> FileSave<'a>> Cache<FE> {
+impl<FE> Cache<FE>
+where
+    FE: FileSave + Clone,
+{
     /// Initialize the cache.
     ///
     /// `cleanup_interval` specifies how often cache cleanup should run in the background.
@@ -149,7 +152,7 @@ impl<FE: for<'a> FileSave<'a>> Cache<FE> {
         DirLock::load(self, path)
     }
 
-    fn gc(&self) -> FuturesUnordered<impl Future<Output = Result<()>>> {
+    fn gc(&self) -> FuturesUnordered<impl Future<Output = Result<()>> + Send> {
         let evictions = FuturesUnordered::new();
 
         let state = self.lock();
@@ -175,10 +178,13 @@ impl<FE: for<'a> FileSave<'a>> Cache<FE> {
     }
 }
 
-fn spawn_cleanup_thread<FE: for<'a> FileSave<'a>>(
+fn spawn_cleanup_thread<FE>(
     cache: Arc<Cache<FE>>,
     mut rx: UnboundedReceiver<Evict>,
-) -> tokio::task::JoinHandle<()> {
+) -> tokio::task::JoinHandle<()>
+where
+    FE: FileSave + Clone,
+{
     tokio::spawn(async move {
         while let Some(Evict) = rx.recv().await {
             let mut evictions = cache.gc();

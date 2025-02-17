@@ -1,14 +1,13 @@
+use async_recursion::async_recursion;
+use ds_ext::OrdHashMap;
+use futures::future;
+use futures::stream::{FuturesUnordered, StreamExt};
+use safecast::AsType;
 use std::cmp::Ordering;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::{fmt, io};
-
-use ds_ext::OrdHashMap;
-use futures::future::{self, Future};
-use futures::stream::{FuturesUnordered, StreamExt};
-use safecast::AsType;
 use tokio::fs;
 use tokio::sync::{
     OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
@@ -425,47 +424,46 @@ impl<FE: Send + Sync> Dir<FE> {
 
     /// Create or overwrite the directory at `name` by copying from `source`,
     /// without necessarily loading its contents into the cache.
-    pub fn copy_dir_from<'a>(
+    #[async_recursion]
+    pub async fn copy_dir_from<'a>(
         &'a mut self,
         name: String,
         source: &'a DirLock<FE>,
-    ) -> Pin<Box<dyn Future<Output = Result<DirLock<FE>>> + Send + 'a>>
+    ) -> Result<DirLock<FE>>
     where
         FE: Clone,
     {
-        Box::pin(async move {
-            if self.contains(&name) {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("there is already an entry at {name}"),
-                ));
-            }
+        if self.contains(&name) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("there is already an entry at {name}"),
+            ));
+        }
 
-            let source = source.read().await;
+        let source = source.read().await;
 
-            let dir = self.create_dir(name)?;
+        let dir = self.create_dir(name)?;
 
-            {
-                let mut dest = dir.try_write()?;
+        {
+            let mut dest = dir.try_write()?;
 
-                // do these copies in-order to avoid the risk of a deadlock
-                // in case any of the contents are locked
-                for (name, entry) in source.iter() {
-                    let name = name.clone();
+            // do these copies in-order to avoid the risk of a deadlock
+            // in case any of the contents are locked
+            for (name, entry) in source.iter() {
+                let name = name.clone();
 
-                    match entry {
-                        DirEntry::Dir(dir) => {
-                            dest.copy_dir_from(name, dir).await?;
-                        }
-                        DirEntry::File(file) => {
-                            dest.copy_file_from(name, file).await?;
-                        }
+                match entry {
+                    DirEntry::Dir(dir) => {
+                        dest.copy_dir_from(name, dir).await?;
+                    }
+                    DirEntry::File(file) => {
+                        dest.copy_file_from(name, file).await?;
                     }
                 }
             }
+        }
 
-            Ok(dir)
-        })
+        Ok(dir)
     }
 
     /// Create or overwrite the file at `name` by copying from `source`,
@@ -503,67 +501,62 @@ impl<FE: Send + Sync> Dir<FE> {
     ///
     /// Make sure to call [`Dir::sync`] to delete any contents on the filesystem if it's possible for
     /// an new entry with the same name to be created later.
-    pub fn delete<'a, Q>(
-        &'a mut self,
-        name: &'a Q,
-    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>
+    #[async_recursion]
+    pub async fn delete<'a, Q>(&'a mut self, name: &'a Q) -> bool
     where
         Q: Name + Send + Sync + ?Sized,
     {
-        Box::pin(async move {
-            if let Some((name, entry)) = self.contents.bisect_and_remove(partial_cmp(name)) {
-                #[cfg(feature = "logging")]
-                log::trace!("deleting dir entry {name}...");
+        if let Some((name, entry)) = self.contents.bisect_and_remove(partial_cmp(name)) {
+            #[cfg(feature = "logging")]
+            log::trace!("deleting dir entry {name}...");
 
-                match &entry {
-                    DirEntry::Dir(dir) => dir.truncate().await,
-                    DirEntry::File(file) => file.delete(true).await,
-                }
-
-                self.deleted.insert(name, entry);
-
-                true
-            } else {
-                false
+            match &entry {
+                DirEntry::Dir(dir) => dir.truncate().await,
+                DirEntry::File(file) => file.delete(true).await,
             }
-        })
+
+            self.deleted.insert(name, entry);
+
+            true
+        } else {
+            false
+        }
     }
 
     /// Synchronize the contents of this directory with the filesystem.
-    pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>
+    #[async_recursion]
+    pub async fn sync(&mut self) -> Result<()>
     where
-        FE: for<'a> FileSave<'a>,
+        FE: FileSave + Clone,
     {
-        Box::pin(async move {
-            if self.contents.is_empty() {
-                self.deleted.clear();
+        if self.contents.is_empty() {
+            self.deleted.clear();
 
-                if self.path.exists() {
-                    delete_dir(self.path()).await
-                } else {
-                    Ok(())
-                }
+            if self.path.exists() {
+                delete_dir(self.path()).await
             } else {
-                for (_name, entry) in self.deleted.drain() {
-                    match entry {
-                        DirEntry::Dir(subdir) => {
-                            let subdir = subdir.write().await;
-                            delete_dir(subdir.path()).await?;
-                        }
-                        DirEntry::File(file) => file.sync().await?,
-                    }
-                }
-
-                for entry in self.contents.values() {
-                    match entry {
-                        DirEntry::Dir(dir) => dir.sync().await?,
-                        DirEntry::File(file) => file.sync().await?,
-                    }
-                }
-
                 Ok(())
             }
-        })
+        } else {
+            for (_name, entry) in self.deleted.drain() {
+                match entry {
+                    DirEntry::Dir(subdir) => {
+                        let subdir = subdir.write().await;
+                        delete_dir(subdir.path()).await?;
+                    }
+                    DirEntry::File(file) => file.sync().await?,
+                }
+            }
+
+            for entry in self.contents.values() {
+                match entry {
+                    DirEntry::Dir(dir) => dir.sync().await?,
+                    DirEntry::File(file) => file.sync().await?,
+                }
+            }
+
+            Ok(())
+        }
     }
 
     /// Delete all entries from this [`Dir`].
@@ -575,25 +568,24 @@ impl<FE: Send + Sync> Dir<FE> {
     /// Make sure to call [`Dir::sync`] to delete any contents on the filesystem if it's possible
     /// for an new entry with the same name to be created later.
     /// Alternately, call [`Dir::truncate_and_sync`].
-    pub fn truncate<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(async move {
-            let mut deletions = FuturesUnordered::new();
+    #[async_recursion]
+    pub async fn truncate<'a>(&'a mut self) {
+        let mut deletions = FuturesUnordered::new();
 
-            for (name, entry) in self.contents.drain() {
-                deletions.push(async move {
-                    match &entry {
-                        DirEntry::Dir(dir) => dir.truncate().await,
-                        DirEntry::File(file) => file.delete(false).await,
-                    }
+        for (name, entry) in self.contents.drain() {
+            deletions.push(async move {
+                match &entry {
+                    DirEntry::Dir(dir) => dir.truncate().await,
+                    DirEntry::File(file) => file.delete(false).await,
+                }
 
-                    (name, entry)
-                })
-            }
+                (name, entry)
+            })
+        }
 
-            while let Some((name, entry)) = deletions.next().await {
-                self.deleted.insert(name, entry);
-            }
-        })
+        while let Some((name, entry)) = deletions.next().await {
+            self.deleted.insert(name, entry);
+        }
     }
 
     /// Delete all entries from this [`Dir`] on the filesystem.
@@ -601,24 +593,21 @@ impl<FE: Send + Sync> Dir<FE> {
     /// **This will cause a deadlock** if there are still active references to the contents
     /// of this directory, i.e. if a lock cannot be acquired on any child of this [`Dir`]
     /// (recursively)!
-    pub fn truncate_and_sync<'a>(
-        &'a mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(async move {
-            let deletes = FuturesUnordered::new();
+    #[async_recursion]
+    pub async fn truncate_and_sync<'a>(&'a mut self) -> Result<()> {
+        let deletes = FuturesUnordered::new();
 
-            for (_name, entry) in self.contents.drain() {
-                deletes.push(async move {
-                    match entry {
-                        DirEntry::Dir(dir) => dir.truncate().await,
-                        DirEntry::File(file) => file.delete(false).await,
-                    }
-                })
-            }
+        for (_name, entry) in self.contents.drain() {
+            deletes.push(async move {
+                match entry {
+                    DirEntry::Dir(dir) => dir.truncate().await,
+                    DirEntry::File(file) => file.delete(false).await,
+                }
+            })
+        }
 
-            deletes.fold((), |(), ()| future::ready(())).await;
-            delete_dir(self.path()).await
-        })
+        deletes.fold((), |(), ()| future::ready(())).await;
+        delete_dir(self.path()).await
     }
 }
 
@@ -761,53 +750,50 @@ impl<FE: Send + Sync> DirLock<FE> {
     }
 
     /// Synchronize the contents of this directory with the filesystem.
-    pub fn sync(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>
+    #[async_recursion]
+    pub async fn sync(&self) -> Result<()>
     where
-        FE: for<'a> FileSave<'a>,
+        FE: FileSave + Clone,
     {
-        Box::pin(async move {
-            let mut dir = self.state.write().await;
-            dir.sync().await
-        })
+        let mut dir = self.state.write().await;
+        dir.sync().await
     }
 
     /// Recursively delete empty entries in this [`Dir`].
     /// Returns the number of entries in this [`Dir`].
-    pub fn trim(&self) -> Pin<Box<dyn Future<Output = Result<usize>> + Send + '_>> {
-        Box::pin(async move {
-            let mut entries = self
-                .try_write()
-                .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))?;
+    #[async_recursion]
+    pub async fn trim(&self) -> Result<usize> {
+        let mut entries = self
+            .try_write()
+            .map_err(|cause| io::Error::new(io::ErrorKind::WouldBlock, cause))?;
 
-            #[cfg(feature = "logging")]
-            log::trace!("trim directory {}", entries.path().display());
+        #[cfg(feature = "logging")]
+        log::trace!("trim directory {}", entries.path().display());
 
-            let mut sizes = Vec::with_capacity(entries.len());
-            for (name, entry) in entries.iter() {
-                match entry {
-                    DirEntry::Dir(dir) => {
-                        let size = dir.trim().await?;
-                        sizes.push((name.clone(), size));
-                    }
-                    DirEntry::File(_) => {}
+        let mut sizes = Vec::with_capacity(entries.len());
+        for (name, entry) in entries.iter() {
+            match entry {
+                DirEntry::Dir(dir) => {
+                    let size = dir.trim().await?;
+                    sizes.push((name.clone(), size));
                 }
+                DirEntry::File(_) => {}
             }
+        }
 
-            for (name, size) in sizes {
-                if size == 0 {
-                    entries.delete(&name).await;
-                }
+        for (name, size) in sizes {
+            if size == 0 {
+                entries.delete(&name).await;
             }
+        }
 
-            Ok(entries.len())
-        })
+        Ok(entries.len())
     }
 
-    fn truncate(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            let mut state = self.state.write().await;
-            state.truncate().await
-        })
+    #[async_recursion]
+    async fn truncate(&self) {
+        let mut state = self.state.write().await;
+        state.truncate().await
     }
 }
 
