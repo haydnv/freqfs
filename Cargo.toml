@@ -1,6 +1,6 @@
 [package]
 name = "freqfs"
-version = "0.10.0"
+version = "0.11.0"
 authors = ["code@tinychain.net"]
 edition = "2021"
 license = "Apache-2.0"
@@ -25,7 +25,7 @@ stream = ["bytes", "destream", "tbon", "tokio-util"]
 async-trait = "0.1"
 bytes = { version = "1.7", optional = true }
 destream = { version = "0.8", optional = true }
-ds-ext = "0.2"
+ds-ext = "0.3"
 futures = "0.3"
 hr-id = { version = "0.6", optional = true }
 log = { version = "0.4", optional = true }
