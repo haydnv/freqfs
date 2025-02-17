@@ -532,7 +532,7 @@ impl<FE: Send + Sync> Dir<FE> {
     /// Synchronize the contents of this directory with the filesystem.
     pub fn sync(&mut self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>
     where
-        FE: for<'a> FileSave<'a>,
+        FE: FileSave + Clone,
     {
         Box::pin(async move {
             if self.contents.is_empty() {
@@ -763,7 +763,7 @@ impl<FE: Send + Sync> DirLock<FE> {
     /// Synchronize the contents of this directory with the filesystem.
     pub fn sync(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>
     where
-        FE: for<'a> FileSave<'a>,
+        FE: FileSave + Clone,
     {
         Box::pin(async move {
             let mut dir = self.state.write().await;

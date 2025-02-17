@@ -22,17 +22,17 @@ logging = ["log"]
 stream = ["bytes", "destream", "tbon", "tokio-util"]
 
 [dependencies]
-async-trait = "0.1"
 bytes = { version = "1.7", optional = true }
-destream = { version = "0.8", optional = true }
+destream = { version = "0.9", optional = true }
 ds-ext = "0.3"
 futures = "0.3"
 hr-id = { version = "0.6", optional = true }
 log = { version = "0.4", optional = true }
 safecast = "0.2"
-tbon = { version = "0.6", features = ["tokio-io"], optional = true }
+tbon = { version = "0.7", features = ["tokio-io"], optional = true }
 tokio = { version = "1.39", features = ["fs", "io-util", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"], optional = true }
+trait-variant = "0.1"
 uuid = { version = "1.10", features = ["v4"] }
 
 [dev-dependencies]
