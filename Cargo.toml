@@ -22,6 +22,7 @@ logging = ["log"]
 stream = ["bytes", "destream", "tbon", "tokio-util"]
 
 [dependencies]
+async-recursion = "1.1"
 bytes = { version = "1.7", optional = true }
 destream = { version = "0.9", optional = true }
 ds-ext = "0.3"

@@ -10,6 +10,7 @@ use tokio::io::AsyncWriteExt;
 
 use freqfs::*;
 
+#[derive(Clone)]
 enum File {
     Bin(Vec<u8>),
     Text(String),

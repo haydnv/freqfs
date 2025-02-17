@@ -93,7 +93,10 @@ impl<FE> Cache<FE> {
     }
 }
 
-impl<FE> Cache<FE> where FE: FileSave + Clone {
+impl<FE> Cache<FE>
+where
+    FE: FileSave + Clone,
+{
     /// Initialize the cache.
     ///
     /// `cleanup_interval` specifies how often cache cleanup should run in the background.

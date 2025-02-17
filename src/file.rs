@@ -3,7 +3,6 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fmt, io};
-
 use futures::{join, Future, TryFutureExt};
 use safecast::AsType;
 use tokio::fs;
@@ -117,21 +116,19 @@ impl<T> FileSave for T
 where
     T: for<'en> destream::en::ToStream<'en> + Send + Sync + 'static,
 {
-    fn save(&self, file: &mut fs::File) -> impl Future<Output = Result<u64>> {
-        Box::pin(async move {
-            use futures::TryStreamExt;
+    async fn save(&self, file: &mut fs::File) -> Result<u64> {
+        use futures::TryStreamExt;
 
-            let encoded = tbon::en::encode(self)
-                .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause))?;
+        let encoded = tbon::en::encode(self)
+            .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause))?;
 
-            let mut reader = tokio_util::io::StreamReader::new(
-                encoded
-                    .map_ok(bytes::Bytes::from)
-                    .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause)),
-            );
+        let mut reader = tokio_util::io::StreamReader::new(
+            encoded
+                .map_ok(bytes::Bytes::from)
+                .map_err(|cause| io::Error::new(io::ErrorKind::InvalidData, cause)),
+        );
 
-            tokio::io::copy(&mut reader, file).await
-        })
+        tokio::io::copy(&mut reader, file).await
     }
 }
 
